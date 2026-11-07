@@ -1,0 +1,4 @@
+# Definitions copied from Linux net/wireless/nl80211.c (Tools/extract_b43.py)
+# nl80211.c is the netlink interface to user space and does not compile
+# on Mac OS 9; this function, however, is cfg80211 logic called by mac80211.
+cfg80211_check_station_change

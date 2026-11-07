@@ -1,0 +1,37 @@
+# Broadcom firmware: not redistributable (see firmware/README.md)
+firmware/*
+!firmware/README.md
+*.fw
+b43fw.c
+
+# Downloaded original sources (the parts used are copied into Common/)
+linux-*/
+wpa_supplicant-*/
+
+# Build products
+Build/out/
+out/
+*.xSYM
+*.pef
+*.xcoff
+*.dsk
+
+# Logs and test runs on the iBook (they contain MACs and nearby network names)
+*.log
+*.out
+errors
+probe_errors
+outputs/
+
+# CodeWarrior (no longer used: the build uses Retro68)
+*.mcp
+*.mcp.xml
+AirPortExtremeTester/AirPortExtremeTester.xml
+AirPortExtremeTester/cwprobe/
+AirPortExtremeNDRV/
+*Data/
+
+# Third-party or historical material
+*.pdf
+Old/
+AirPortExtremeTester/Old/
