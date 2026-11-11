@@ -103,9 +103,57 @@ target_link_libraries(wpas PUBLIC linux80211)
 # ---------------------------------------------------------------------------
 add_application(AirPortTester
     ${TESTER}/AirPortTester.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../AirPortExtremeDriver/drv_pool.c
     ${CMAKE_CURRENT_SOURCE_DIR}/AirPortTester.r
     CONSOLE)
-target_include_directories(AirPortTester PRIVATE ${TESTER} ${COMMON}/os9)
+target_include_directories(AirPortTester PRIVATE ${TESTER} ${COMMON}/os9
+    ${CMAKE_CURRENT_SOURCE_DIR}/../AirPortExtremeDriver)
 target_compile_options(AirPortTester PRIVATE -std=gnu11 -Os -ffunction-sections -mtraceback=full -Wall)
 target_link_libraries(AirPortTester wpas linux80211 NameRegistryLib PCILib)
 set_target_properties(AirPortTester PROPERTIES LINK_FLAGS "-Wl,-gc-sections -Wl,-Map=AirPortTester.map")
+
+# ---------------------------------------------------------------------------
+# Open Transport driver ('ndrv' for the Extensions folder)
+#
+# Needs Apple's Universal Interfaces (OpenTransportKernel.h, dlpi.h) and an
+# import library for the Open Transport kernel fragments (OTKernelLib,
+# OTKernelUtilLib, OTUtilityLib, DLPISupportLib), made with Retro68's
+# MakeImport from the "Open Transport" extension of a Mac OS 9 system.
+# ---------------------------------------------------------------------------
+set(OT_KERNEL_LIB "$ENV{HOME}/retro/otlibs/libOTKernel.a" CACHE FILEPATH
+    "Import library of the Open Transport kernel fragments")
+set(DRIVER ${CMAKE_CURRENT_SOURCE_DIR}/../AirPortExtremeDriver)
+if(EXISTS ${OT_KERNEL_LIB})
+    add_ndrv(AirPortExtreme
+        EXPORTS ${DRIVER}/AirPortDriver.exp
+        CFRAG_NAME "AirPortExtreme"
+        CREATOR "APXd"
+        ${DRIVER}/AirPortDriver.c
+        ${DRIVER}/drv_link.c
+        ${DRIVER}/drv_env.c
+        ${DRIVER}/drv_pool.c
+        ${DRIVER}/drv_prefs.c)
+    target_include_directories(AirPortExtreme PRIVATE ${DRIVER} ${COMMON}/os9)
+    target_compile_options(AirPortExtreme PRIVATE -std=gnu11 -Os -mtraceback=full -Wall)
+    target_link_libraries(AirPortExtreme wpas linux80211 ${OT_KERNEL_LIB}
+        DriverServicesLib NameRegistryLib PCILib InterfaceLib)
+    target_link_options(AirPortExtreme PRIVATE "LINKER:-Map=AirPortExtreme.map")
+else()
+    message(WARNING "${OT_KERNEL_LIB} not found: the Open Transport driver is not built")
+endif()
+
+# Open Transport diagnostics (console application)
+add_application(OTCheck
+    ${DRIVER}/OTCheck.c
+    CONSOLE)
+target_compile_options(OTCheck PRIVATE -std=gnu11 -Os -mtraceback=full -Wall)
+target_link_libraries(OTCheck OpenTransportAppPPC OpenTptInetPPC OpenTransportLib
+    OpenTptInternetLib)
+
+# Status and log reader for the driver (console application)
+add_application(AirPortStatus
+    ${DRIVER}/AirPortStatus.c
+    CONSOLE)
+target_include_directories(AirPortStatus PRIVATE ${DRIVER})
+target_compile_options(AirPortStatus PRIVATE -std=gnu11 -Os -mtraceback=full -Wall)
+target_link_libraries(AirPortStatus NameRegistryLib)

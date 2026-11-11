@@ -1,0 +1,5 @@
+TheDriverDescription
+GetOTInstallInfo
+InitStreamModule
+TerminateStreamModule
+ValidateHardware

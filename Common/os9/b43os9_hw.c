@@ -63,6 +63,9 @@ void b43os9_get_hwinfo(b43os9 *b, b43os9_hwinfo *info)
     info->fw_patch = dev->fw.patch;
     info->fw_hdr_format = dev->fw.hdr_format;
     info->desired_txpower = phy->desired_txpower;
+    info->tx_ack_failures = wl->ieee_stats.dot11ACKFailureCount;
+    info->tx_rts_failures = wl->ieee_stats.dot11RTSFailureCount;
+    info->rx_fcs_errors = wl->ieee_stats.dot11FCSErrorCount;
     if (phy->type == B43_PHYTYPE_G && phy->g) {
         info->bbatt = phy->g->bbatt.att;
         info->rfatt = phy->g->rfatt.att;

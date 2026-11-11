@@ -35,3 +35,10 @@ AirPortExtremeNDRV/
 *.pdf
 Old/
 AirPortExtremeTester/Old/
+
+# Apple Universal Interfaces (copyrighted, used only to build)
+Universal.zip
+Universal/
+Open Transport.sit
+PCCardNetworkSample.zip
+PCCardNetworkSample/

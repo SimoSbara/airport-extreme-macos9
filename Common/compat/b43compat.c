@@ -187,12 +187,17 @@ void mdelay(unsigned long ms)
 
 /* msleep: in Linux the scheduler runs other things while sleeping; here
  * pending work and expired timers run meanwhile, as other threads would */
+/* Diagnostics: work items run from an msleep() of code that is not itself a
+ * work item. In Linux such a work item would wait if it needed a mutex the
+ * sleeper holds; here mutexes do not block, so it runs in between. */
+unsigned long b43compat_msleep_works;
+
 void msleep(unsigned int ms)
 {
     u64 end = b43compat_time_us64() + (u64)ms * 1000;
 
     while (b43compat_time_us64() < end) {
-        b43compat_run_work();
+        b43compat_msleep_works += (unsigned long)b43compat_run_work();
         udelay(100);
     }
 }
@@ -297,10 +302,22 @@ int b43compat_run_work(void)
     for (i = 0; i < B43COMPAT_MAX_WORK; i++) {
         w = g_work[i];
         if (w) {
+            u64 t0 = b43compat_time_us64(), dt;
+
             g_work[i] = NULL;
             w->pending = 0;
             w->func(w);
             ran++;
+            /* Diagnostics: long work items are the calibrations of b43
+             * (periodic work, TX power adjustment) and the scans. The code
+             * addresses are resolved with the link map; this function's
+             * address gives the load offset. */
+            dt = b43compat_time_us64() - t0;
+            if (dt >= 20000)
+                printk("b43compat: work %08lx took %lu ms (run_work at %08lx)\n",
+                       *(const unsigned long *)(const void *)w->func,
+                       (unsigned long)(dt / 1000),
+                       *(const unsigned long *)(const void *)b43compat_run_work);
         }
     }
     g_in_run_work = 0;
@@ -334,15 +351,27 @@ void b43compat_free_irq(void *dev_id)
     }
 }
 
+/* Statistics for the host's diagnostics */
+unsigned long b43compat_irq_polls;      /* polls with a handler installed */
+unsigned long b43compat_irq_hard;       /* the hard handler claimed the IRQ */
+unsigned long b43compat_irq_threads;    /* the threaded handler ran */
+
 int b43compat_poll_irq(void)
 {
     irqreturn_t ret;
 
     if (!b43compat_irq_handler)
         return 0;
+    b43compat_irq_polls++;
     ret = b43compat_irq_handler(0, b43compat_irq_dev);
-    if (ret == IRQ_WAKE_THREAD && b43compat_irq_thread)
+    if (ret != IRQ_NONE)
+        b43compat_irq_hard++;
+    if (ret == IRQ_WAKE_THREAD && b43compat_irq_thread) {
+        b43compat_irq_threads++;
         ret = b43compat_irq_thread(0, b43compat_irq_dev);
+    }
+    if (ret != IRQ_NONE)
+        b43compat_entropy_poll();       /* time of the interrupt */
     return ret != IRQ_NONE;
 }
 

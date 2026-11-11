@@ -56,6 +56,28 @@
 /* os_*() implemented in os9/os_os9.c (no libc in the driver) */
 #define OS_NO_C_LIB_DEFINES
 
+/*
+ * Console output. utils/wpa_debug.c prints with printf()/vprintf() and
+ * sizes its messages with vsnprintf(): all of it goes to the log of the
+ * port instead (os9/os_os9.c and the formatter of Common/compat), which
+ * also works in the Open Transport driver, where there is no stdio.
+ * <stdio.h> comes first so that the libc prototypes keep their names, and
+ * the macros take arguments so that PRINTF_FORMAT's "format (printf, ...)"
+ * is left alone.
+ */
+#include <stdio.h>
+#include <stdarg.h>
+#include <stddef.h>
+int wpas_os9_printf(const char *fmt, ...);
+int wpas_os9_vprintf(const char *fmt, va_list ap);
+int b43c_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
+int b43c_snprintf(char *buf, size_t size, const char *fmt, ...);
+#define printf(...)                 wpas_os9_printf(__VA_ARGS__)
+#define vprintf(fmt, ap)            wpas_os9_vprintf(fmt, ap)
+#define vsnprintf(b, s, fmt, ap)    b43c_vsnprintf(b, s, fmt, ap)
+#define snprintf(...)               b43c_snprintf(__VA_ARGS__)
+#define setvbuf(f, b, m, s)         ((void)0)
+
 /* PowerPC: big-endian (utils/common.h does not recognize Mac OS 9) */
 #define __LITTLE_ENDIAN 1234
 #define __BIG_ENDIAN    4321

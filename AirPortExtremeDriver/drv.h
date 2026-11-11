@@ -1,0 +1,50 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (c) 2026 SimoSbara */
+#ifndef APX_DRV_H_
+#define APX_DRV_H_
+
+/*
+ * drv.h - Private interface between the files of the Open Transport driver.
+ *
+ *   AirPortDriver.c   Open Transport module: STREAMS, DLPI, timer
+ *   drv_link.c        connection manager (scan, connect, reconnect)
+ *   drv_env.c         b43_env for Common/: memory pool, time, log, PCI
+ *   drv_prefs.c       the "AirPort Extreme Prefs" file
+ */
+#include <MacTypes.h>
+#include <NameRegistry.h>
+#include "b43os9.h"
+#include "apx_status.h"
+
+/* Settings read from the preferences file (drv_prefs.c) */
+typedef struct drv_prefs {
+    char          ssid[33];
+    char          password[64];         /* empty: open network */
+    char          country[3];           /* ISO 3166, "" = world ("00") */
+    unsigned long memory_kb;            /* memory pool of the stack */
+    int           verbose;              /* b43 verbose (0..3) */
+    int           wpa_debug;            /* wpa_supplicant debug level */
+    int           pr_debug;             /* pr_debug of ssb/mac80211/cfg80211 */
+    int           debug;                /* 1 = driver diagnostics in the log */
+} drv_prefs;
+
+void drv_prefs_defaults(drv_prefs *p);
+int  drv_prefs_load(drv_prefs *p);      /* 0 = read, otherwise File Manager error */
+
+/* Environment (drv_env.c). Created at task time, used at any time. */
+int   drv_env_init(RegEntryID *node, unsigned long pool_bytes, apx_status *st);
+void  drv_env_free(void);
+const b43_env *drv_env(void);
+unsigned long drv_time_ms(void);
+void  drv_log(const char *fmt, ...);
+
+/* Connection manager (drv_link.c), called with the stack lock held */
+void  drv_link_init(b43os9 *b, const drv_prefs *prefs, apx_status *st);
+void  drv_link_step(int want_up);
+int   drv_link_can_send(void);
+const b43os9_events *drv_link_events(void);
+
+/* AirPortDriver.c: hands a received Ethernet frame to Open Transport */
+void  drv_deliver(const unsigned char *frame, unsigned long len);
+
+#endif /* APX_DRV_H_ */

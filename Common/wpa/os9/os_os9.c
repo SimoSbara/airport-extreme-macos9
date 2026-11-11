@@ -15,8 +15,27 @@
 
 /* Implemented in the compatibility layer (Common/compat) */
 unsigned long long b43compat_time_us64(void);
-int b43c_vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
+void b43compat_log_va(const char *prefix, const char *fmt, va_list ap);
 void get_random_bytes(void *buf, int nbytes);
+
+/* =========================================================================
+ * Console output of utils/wpa_debug.c (see build_config.h): to the log
+ * ========================================================================= */
+int wpas_os9_vprintf(const char *fmt, va_list ap)
+{
+    b43compat_log_va(NULL, fmt, ap);
+    return 0;
+}
+
+int wpas_os9_printf(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    b43compat_log_va(NULL, fmt, ap);
+    va_end(ap);
+    return 0;
+}
 
 /* =========================================================================
  * Time

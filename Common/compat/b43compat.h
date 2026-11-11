@@ -45,6 +45,9 @@
 /* mac80211/cfg80211 built into the driver (as =y) */
 #define CONFIG_CFG80211         1
 #define CONFIG_MAC80211         1
+/* mac80211's connection messages (beacon loss, probing the AP, state
+ * changes): printed with pr_debug, so only when the host enables it */
+#define CONFIG_MAC80211_MLME_DEBUG 1
 /* CONFIG_B43_DEBUG, CONFIG_B43_BCMA, CONFIG_B43_LEDS, CONFIG_B43_HWRNG,
  * CONFIG_B43_PHY_N/LP/HT/LCN/AC: not defined */
 
@@ -281,7 +284,8 @@ void usleep_range(unsigned long min_us, unsigned long max_us);
  * and by ktime_get() */
 extern unsigned long jiffies;
 unsigned long b43compat_jiffies(void);
-#define msecs_to_jiffies(ms)    ((unsigned long)(ms) / (1000 / HZ))
+/* Rounds up, as Linux does: a timeout shorter than a tick is one tick, not 0 */
+#define msecs_to_jiffies(ms)    (((unsigned long)(ms) + (1000 / HZ) - 1) / (1000 / HZ))
 #define jiffies_to_msecs(j)     ((unsigned long)(j) * (1000 / HZ))
 #define time_after(a, b)        ((long)((b) - (a)) < 0)
 #define time_before(a, b)       time_after(b, a)

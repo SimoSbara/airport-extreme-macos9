@@ -36,6 +36,7 @@
 #include "AirPortTester.h"
 #include "b43os9.h"
 #include "b43fw.h"
+#include "drv_pool.h"
 
 typedef unsigned char  u8;
 typedef unsigned short u16;
@@ -164,16 +165,46 @@ static void tprintf(const char *fmt, ...)
     tester_log(NULL, buf);
 }
 
+static drv_pool_stats g_pool;
+static int            g_use_pool;
+
+/* Code address of main (a function pointer points to its transition
+ * vector, whose first word is the code): with it, the code addresses in the
+ * log can be turned into offsets in the binary */
+int main(void);
+static unsigned long main_addr(void)
+{
+    return *(const unsigned long *)(const void *)main;
+}
+
+/* Block written after its free: the addresses are resolved on the PC
+ * with the link map (tbname.py) */
+static void pool_report(void *block, unsigned long size, unsigned long offset,
+                        unsigned long alloc_caller, unsigned long free_caller)
+{
+    tprintf(" [POOL] block %p (%lu bytes) written after free at offset %lu:"
+            " allocated by %08lX, freed by %08lX, main at %08lX\n",
+            block, size, offset, alloc_caller, free_caller, (unsigned long)main_addr());
+}
+
 static void *tester_alloc(void *ctx, unsigned long size)
 {
     (void)ctx;
-    return malloc(size);
+    return g_use_pool ? drv_pool_alloc(size) : malloc(size);
 }
 
 static void tester_free(void *ctx, void *p)
 {
+    unsigned long bad = g_pool.bad_frees;
+
     (void)ctx;
-    free(p);
+    if (!g_use_pool) {
+        free(p);
+        return;
+    }
+    drv_pool_free(p);
+    if (g_pool.bad_frees != bad)
+        tprintf(" [ERR] kfree of an invalid block %p\n", p);
 }
 
 static unsigned long tester_cfg_read32(void *ctx, unsigned short offset)
@@ -585,6 +616,11 @@ static void do_dhcp(void)
 
 static void print_summary(void)
 {
+    if (g_use_pool)
+        tprintf("\n Memory (driver allocator): %lu KB used, peak %lu KB of %lu KB,"
+                " %lu failures, %lu bad frees, %lu written after free\n",
+                g_pool.used / 1024, g_pool.peak / 1024, g_pool.size / 1024,
+                g_pool.failures, g_pool.bad_frees, g_pool.poison_errors);
     tprintf("\n============================================================\n");
     tprintf(" SUMMARY\n");
     tprintf("  stack/firmware start . %s\n", g_ok_init ? "OK" : "--");
@@ -647,6 +683,25 @@ int main(void)
         return 0;
     }
     tprintf(" MMIO %p\n", (void *)g_ctx.mmio);
+
+    /* Memory */
+    {
+        char ans[8];
+        ask_line(" Driver allocator (y/n)", TEST_DRIVER_POOL ? "y" : "n", 1, ans, sizeof(ans));
+        g_use_pool = (ans[0] == 'y' || ans[0] == 'Y');
+    }
+    if (g_use_pool) {
+        void *mem = NewPtr(TEST_POOL_KB * 1024UL);
+        if (!mem) {
+            tprintf(" [ERR] no memory for the %u KB pool\n", TEST_POOL_KB);
+            return 0;
+        }
+        g_pool.report = pool_report;
+        drv_pool_init(mem, TEST_POOL_KB * 1024UL, &g_pool);
+        tprintf(" Memory: driver allocator, %u KB\n", TEST_POOL_KB);
+    } else {
+        tprintf(" Memory: malloc\n");
+    }
 
     /* Environment */
     memset(&g_env, 0, sizeof(g_env));

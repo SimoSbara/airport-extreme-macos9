@@ -90,6 +90,9 @@ typedef struct b43os9_hwinfo {
     unsigned short fw_rev, fw_patch, fw_hdr_format;
     int            desired_txpower;
     int            bbatt, rfatt, tx_control, tx_bias, tx_magn;
+    /* b43's low-level counters: frames of ours the AP did not acknowledge,
+     * RTS without CTS, received frames with a bad checksum */
+    unsigned long  tx_ack_failures, tx_rts_failures, rx_fcs_errors;
 } b43os9_hwinfo;
 
 /* Ciphers (as 802.11 WLAN_CIPHER_SUITE_*) */

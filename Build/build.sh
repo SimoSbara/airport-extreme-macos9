@@ -7,8 +7,9 @@
 #     Build/build.sh            build
 #     Build/build.sh clean      rebuild from scratch
 #
-# Output in Build/out/: AirPortTester.bin (MacBinary, to be copied to the Mac
-# and decoded with StuffIt Expander) and AirPortTester.dsk (disk image).
+# Output in Build/out/ (MacBinary, to be copied to the Mac and decoded with
+# StuffIt Expander): AirPortTester.bin, AirPortExtreme.bin (the Open Transport
+# driver, for the Extensions folder) and AirPortStatus.bin.
 
 set -e
 VM="simosbara@debian-vm"
@@ -22,7 +23,7 @@ cd "$(dirname "$0")/.."
 # Sources: Common, Tester (without Old), Build
 tar cf - --exclude='AirPortExtremeTester/Old' --exclude='AirPortExtremeTester/cwprobe' \
     --exclude='*.mcp' --exclude='*.xml' --exclude='Build/out' \
-    Common AirPortExtremeTester Build Tools/fw2c.py firmware | $SSH "mkdir -p $REMOTE && tar xf - -C $REMOTE"
+    Common AirPortExtremeTester AirPortExtremeDriver Build Tools/fw2c.py firmware | $SSH "mkdir -p $REMOTE && tar xf - -C $REMOTE"
 
 if [ "$1" = "clean" ]; then
     $SSH "rm -rf $REMOTE/out"
@@ -32,5 +33,7 @@ $SSH "cd $REMOTE && \
       cmake --build out -j8 -- -k 2>&1 | grep -E 'error|warning: implicit|undefined reference|Error|Linking|Built target' | head -200"
 
 mkdir -p Build/out
-scp -q -i "$KEY" "$VM:$REMOTE/out/AirPortTester.bin" "$VM:$REMOTE/out/AirPortTester.dsk" Build/out/ 2>/dev/null \
-    && ls -l Build/out
+for f in AirPortTester.bin AirPortTester.dsk AirPortExtreme.bin AirPortStatus.bin OTCheck.bin; do
+    scp -q -i "$KEY" "$VM:$REMOTE/out/$f" Build/out/ 2>/dev/null || echo "missing: $f"
+done
+ls -l Build/out

@@ -373,6 +373,7 @@ u16 ioread16(const void __iomem *addr)
 {
     u16 v = *(const volatile u16 *)addr;
     io_barrier();
+    b43compat_entropy_add(v);
     return le16_to_cpu(v);
 }
 
@@ -380,6 +381,7 @@ u32 ioread32(const void __iomem *addr)
 {
     u32 v = *(const volatile u32 *)addr;
     io_barrier();
+    b43compat_entropy_add(v);
     return le32_to_cpu(v);
 }
 
@@ -410,13 +412,19 @@ void ioread8_rep(const void __iomem *addr, void *buf, unsigned long count)
         *b++ = ioread8(addr);
 }
 
+/* Diagnostics: block reads = PIO receive (frame headers and data), so this
+ * counts what the chip hands over, before any filtering or decryption */
+unsigned long b43compat_pio_reads;
+
 void ioread16_rep(const void __iomem *addr, void *buf, unsigned long count)
 {
     u8 *b = (u8 *)buf;
     u16 w;
+    b43compat_pio_reads++;
     while (count--) {
         w = *(const volatile u16 *)addr;
         io_barrier();
+        b43compat_entropy_add(w);
         b[0] = (u8)(w >> 8);
         b[1] = (u8)w;
         b += 2;
@@ -430,6 +438,7 @@ void ioread32_rep(const void __iomem *addr, void *buf, unsigned long count)
     while (count--) {
         w = *(const volatile u32 *)addr;
         io_barrier();
+        b43compat_entropy_add(w);
         b[0] = (u8)(w >> 24);
         b[1] = (u8)(w >> 16);
         b[2] = (u8)(w >> 8);

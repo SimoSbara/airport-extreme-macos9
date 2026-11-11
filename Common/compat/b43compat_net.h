@@ -90,13 +90,23 @@ struct rcu_head {
 #define rcu_head_init(h)                do { } while (0)
 #define synchronize_rcu()               do { } while (0)
 #define synchronize_net()               do { } while (0)
-#define rcu_barrier()                   do { } while (0)
 #define rcu_read_lock_held()            1
 #define lockdep_is_held(l)              1
-/* The callback runs immediately: there are no readers in progress */
-#define call_rcu(head, f)               ((f)(head))
-/* kfree_rcu(ptr, field): frees the object immediately */
-#define kfree_rcu(ptr, field)           kfree(ptr)
+/*
+ * Callbacks and frees are deferred to the end of the current pass of the
+ * main loop (b43os9_poll), which is the grace period here: the stack runs
+ * one pass at a time and no reader holds a pointer across passes. Freeing at
+ * once would let the allocator hand the memory out again while the code
+ * that removed the object is still walking it, as Linux allows.
+ */
+void b43compat_call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *head));
+void b43compat_rcu_process(void);
+#define call_rcu(head, f)               b43compat_call_rcu((head), (f))
+/* As in Linux: the offset of the rcu_head stands in for the callback */
+#define kfree_rcu(ptr, field) \
+    b43compat_call_rcu(&(ptr)->field, \
+        (void (*)(struct rcu_head *))(unsigned long)offsetof(typeof(*(ptr)), field))
+#define rcu_barrier()                   b43compat_rcu_process()
 
 /* =========================================================================
  * Bitops (linux/bitops.h, linux/bitmap.h)
@@ -269,8 +279,17 @@ int  del_timer(struct timer_list *t);
 /* =========================================================================
  * Random numbers, CRC
  * ========================================================================= */
+/* Random numbers (b43compat_random.c): get_random_bytes is a CSPRNG (AES-CTR
+ * keyed by an entropy pool), as wpa_supplicant uses it for the WPA nonces */
 void get_random_bytes(void *buf, int nbytes);
 u32  prandom_u32(void);
+/* Entropy: every value read from the card goes into a cheap accumulator,
+ * folded into the pool at every interrupt poll with the time of the poll */
+extern u32 b43compat_entropy_acc;
+#define b43compat_entropy_add(v) \
+    (b43compat_entropy_acc = ((b43compat_entropy_acc << 7) | (b43compat_entropy_acc >> 25)) + (u32)(v))
+void b43compat_entropy_poll(void);
+void b43compat_entropy_data(const void *data, unsigned long len);
 #define get_random_u32()        prandom_u32()
 #define prandom_u32_max(r)      ((u32)(((u64)prandom_u32() * (r)) >> 32))
 u32  crc32_le(u32 crc, const unsigned char *p, size_t len);

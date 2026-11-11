@@ -54,4 +54,10 @@
  * than a typical Mac program) */
 #define TEST_EXTRA_STACK        (256UL * 1024UL)
 
+/* Memory: 1 = the driver's allocator (AirPortExtremeDriver/drv_pool.c) on a
+ * block of TEST_POOL_KB, so that the Tester behaves like the driver (freed
+ * memory is reused at once and poisoned with 0x6B); 0 = malloc */
+#define TEST_DRIVER_POOL        1
+#define TEST_POOL_KB            4096
+
 #endif /* AIRPORT_TESTER_H_ */

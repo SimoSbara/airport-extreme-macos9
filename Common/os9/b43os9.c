@@ -35,6 +35,7 @@ static void os9_rx(void *ctx, struct sk_buff *skb)
     if (skb_mac_header_was_set(skb)) {
         u8 *eth = skb_mac_header(skb);
         unsigned long hlen = (unsigned long)(skb->data - eth);
+        b43compat_entropy_data(eth, hlen + skb->len);
         /* EAPOL to the supplicant (on Linux it reads it from a packet socket) */
         if (skb->protocol == htons(ETH_P_PAE) && b->supp.rx_eapol && hlen >= ETH_HLEN)
             b->supp.rx_eapol(b->supp.ctx, eth + ETH_ALEN, skb->data, skb->len);
@@ -151,6 +152,7 @@ void b43os9_poll(b43os9 *b)
     b43compat_run_work();
     if (b->supp.poll)
         b->supp.poll(b->supp.ctx);
+    b43compat_rcu_process();            /* end of the pass: grace period */
 }
 
 /* =========================================================================
