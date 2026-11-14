@@ -92,7 +92,13 @@ the Tester is built.
    ```
 3. Restart and choose the AirPort Extreme port ("Ethernet Slot B" on an
    iBook G4) in the TCP/IP control panel.
-4. `AirPortStatus` shows the connection and saves the driver's log.
+4. `AirPortStatus` shows the connection (state, signal, rates, why the last
+   attempt failed) and saves the driver's log. It then asks the driver for a
+   scan, lists the networks found and can join another network, disconnect,
+   or turn AirPort off and on (`/off`, `/on`, `/disconnect`): a test of the
+   command interface the utility will use (see `apx_status.h`). The change
+   lasts until the next restart; `power=0` in the prefs starts with AirPort
+   off.
 
 The password is stored in clear text in that file until the utility exists.
 `dma=0` makes the chip use PIO transfers instead of DMA, `irq=0` turns off

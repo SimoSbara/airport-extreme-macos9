@@ -6,7 +6,9 @@
  * A text file (SimpleText is fine), one "key=value" setting per line:
  *
  *     ssid=MyNetwork
- *     password=my wpa password        (omit for an open network)
+ *     password=my wpa password        (omit for an open network, or when the
+ *                                      utility gives it from the Keychain)
+ *     power=1                         (0 = AirPort off at startup)
  *     country=IT                      (regulatory domain, default world)
  *     memory_kb=4096                  (memory pool of the stack)
  *     dma=1                           (0 = PIO transfers, slower)
@@ -49,6 +51,7 @@ void drv_prefs_defaults(drv_prefs *p)
 {
     memset(p, 0, sizeof(*p));
     p->memory_kb = 4096;
+    p->power = 1;
     p->verbose = 1;
     p->wpa_debug = 3;           /* MSG_INFO */
     p->pr_debug = 0;
@@ -83,6 +86,8 @@ static void apply(drv_prefs *p, const char *key, const char *val)
         set_str(p->ssid, sizeof(p->ssid), val);
     else if (!strcmp(key, "password"))
         set_str(p->password, sizeof(p->password), val);
+    else if (!strcmp(key, "power"))
+        p->power = (int)parse_ulong(val);
     else if (!strcmp(key, "country"))
         set_str(p->country, sizeof(p->country), val);
     else if (!strcmp(key, "memory_kb"))

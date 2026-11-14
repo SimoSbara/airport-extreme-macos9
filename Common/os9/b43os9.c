@@ -353,6 +353,7 @@ int b43os9_scan_result(b43os9 *b, unsigned int idx, b43os9_bss *out)
             out->signal_dbm = bss->pub.signal;
         out->capability = bss->pub.capability;
         out->beacon_interval = bss->pub.beacon_interval;
+        out->age_ms = jiffies_to_msecs(jiffies - bss->ts);
         ssid = ieee80211_bss_get_ie(&bss->pub, WLAN_EID_SSID);
         if (ssid && ssid[1] <= 32) {
             memcpy(out->ssid, ssid + 2, ssid[1]);

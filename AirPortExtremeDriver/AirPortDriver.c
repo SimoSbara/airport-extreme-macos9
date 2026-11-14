@@ -51,6 +51,7 @@
 #include <DriverFamilyMatching.h>
 #include <Timer.h>
 #include <NameRegistry.h>
+#include <CodeFragments.h>
 
 #include "dle.h"
 
@@ -97,6 +98,10 @@ typedef struct apx_stream {
 static board              g_board;
 static int                g_dle_ready;
 static int                g_attached;   /* the stack survives Terminate/Init */
+static OTPortRef          g_port_ref;   /* our port, for OTChangePortState (0 = not found) */
+typedef TPortRecord *(*get_indexed_port_fn)(OTItemCount index);
+typedef OSStatus (*change_port_state_fn)(OTPortRef ref, OTEventCode change, OTResult why);
+static change_port_state_fn g_change_port_state;   /* from OTKernelUtilLib */
 static b43os9            *g_b43;
 static drv_prefs          g_prefs;
 static apx_status        *g_st;
@@ -650,6 +655,7 @@ static int service(void)
     unsigned long hard = b43compat_irq_hard;
     int from_irq = g_irq_masked;
     static unsigned long idle_irqs;
+    int net_change;
 
     if (g_stopping)
         return 1;
@@ -657,6 +663,7 @@ static int service(void)
         return 0;
     t0 = UpTime();
     on_stack(stack_run);
+    net_change = drv_link_take_network_change();
     /* An interrupt b43 does not claim, again and again, would come back
      * forever (shared or stuck line): give up on interrupts, keep polling */
     if (from_irq && g_irq_on) {
@@ -686,7 +693,85 @@ static int service(void)
         g_irq_masked = 0;
         g_ist_enable(g_ist, g_ist_refcon);
     }
+    /* A new connection: the port may be on another network. The TCP/IP
+     * configurator (OTInetControllerLib) answers kOTPortNetworkChange by
+     * stopping its DHCP timers and asking for an address again; without
+     * it, TCP/IP keeps the address of the network it was on. Outside the
+     * Linux stack and its lock: OT calls its clients' notifiers. */
+    if (net_change && g_port_ref && g_change_port_state && !g_stopping) {
+        OSStatus err = g_change_port_state(g_port_ref, kOTPortNetworkChange, 0);
+
+        drv_log("apx: Open Transport told of the new network (%ld)\n", (long)err);
+    }
     return 1;
+}
+
+/* OTGetIndexedPort and OTChangePortState exist twice with the same names:
+ * in OTKernelUtilLib for drivers, and in OTClientUtilLib for applications,
+ * with other arguments (the client OTGetIndexedPort copies the record to
+ * the address it is given). The import library holds both and the linker
+ * took the client ones, so they are taken by name from OTKernelUtilLib. */
+static void *kernel_util_symbol(ConstStr255Param name)
+{
+    static CFragConnectionID conn;
+    static int tried;
+    Ptr main_addr, sym;
+    Str255 err_name;
+    CFragSymbolClass cls;
+
+    if (!tried) {
+        tried = 1;
+        if (GetSharedLibrary("\pOTKernelUtilLib", kPowerPCCFragArch, kReferenceCFrag,
+                             &conn, &main_addr, err_name) != noErr)
+            conn = 0;
+    }
+    /* A code symbol is a transition vector: a C function pointer on PowerPC */
+    if (!conn || FindSymbol(conn, name, &sym, &cls) != noErr || cls != kTVectorCFragSymbol)
+        return NULL;
+    return sym;
+}
+
+static int same_name(const char *a, const char *b)
+{
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+/* Our port in the Open Transport port list: the one our module serves.
+ * Task time (InitStreamModule). */
+static OTPortRef find_port(void)
+{
+    get_indexed_port_fn get_indexed_port;
+    TPortRecord *port;
+    OTItemCount i;
+
+    get_indexed_port = (get_indexed_port_fn)kernel_util_symbol("\pOTGetIndexedPort");
+    g_change_port_state = (change_port_state_fn)kernel_util_symbol("\pOTChangePortState");
+    if (!get_indexed_port || !g_change_port_state) {
+        drv_log("apx: OTKernelUtilLib has no OTGetIndexedPort/OTChangePortState: TCP/IP"
+                " will not hear of network changes\n");
+        return 0;
+    }
+    for (i = 0; (port = get_indexed_port(i)) != NULL; i++) {
+        if (port->fAlias || !port->fModuleName)
+            continue;
+        if (same_name(port->fModuleName, DRIVER_NAME)) {
+            drv_log("apx: Open Transport port \"%s\" (ref %08lX)\n",
+                    port->fPortName ? port->fPortName : "?", (unsigned long)port->fRef);
+            return port->fRef;
+        }
+    }
+    drv_log("apx: our Open Transport port was not found: TCP/IP will not hear of"
+            " network changes. Ports:\n");
+    for (i = 0; (port = get_indexed_port(i)) != NULL; i++)
+        drv_log("apx:   \"%s\" module \"%s\" ref %08lX%s\n",
+                port->fPortName ? port->fPortName : "?",
+                port->fModuleName ? port->fModuleName : "?", (unsigned long)port->fRef,
+                port->fAlias ? " (alias)" : "");
+    return 0;
 }
 
 static pascal void tick(void *arg)
@@ -1043,7 +1128,8 @@ static int attach_stack(void)
     if (g_prefs.watchdog)
         watch_install();
 
-    drv_log("AirPort Extreme driver 1.0d1 - Linux 5.15 wireless stack on Open Transport\n");
+    drv_log("AirPort Extreme driver " APX_DRIVER_VERSION
+            " - Linux 5.15 wireless stack on Open Transport\n");
     if (prefs_err)
         drv_log("apx: \"AirPort Extreme Prefs\" not read (%d): no network configured\n", prefs_err);
     else
@@ -1118,6 +1204,7 @@ Boolean InitStreamModule(void *portInfo)
         g_attached = 1;
         if (g_prefs.irq)
             g_irq_on = irq_install() == 0;
+        g_port_ref = find_port();
     } else {
         drv_log("apx: Open Transport reloads the driver\n");
     }

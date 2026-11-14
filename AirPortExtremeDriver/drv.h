@@ -17,10 +17,13 @@
 #include "b43os9.h"
 #include "apx_status.h"
 
+#define APX_DRIVER_VERSION  "1.0d2"
+
 /* Settings read from the preferences file (drv_prefs.c) */
 typedef struct drv_prefs {
     char          ssid[33];
     char          password[64];         /* empty: open network */
+    int           power;                /* 0 = AirPort off at startup */
     char          country[3];           /* ISO 3166, "" = world ("00") */
     unsigned long memory_kb;            /* memory pool of the stack */
     int           verbose;              /* b43 verbose (0..3) */
@@ -55,6 +58,7 @@ void  drv_screen_putc(char c);          /* any level; nothing if not on */
 void  drv_link_init(b43os9 *b, const drv_prefs *prefs, apx_status *st);
 void  drv_link_step(int want_up);
 int   drv_link_can_send(void);
+int   drv_link_take_network_change(void);
 const b43os9_events *drv_link_events(void);
 
 /* AirPortDriver.c: hands a received Ethernet frame to Open Transport */

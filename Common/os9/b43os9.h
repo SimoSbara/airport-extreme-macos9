@@ -71,6 +71,8 @@ typedef struct b43os9_bss {
     unsigned short beacon_interval;
     unsigned char ies[512];             /* information elements (RSN, WPA, ...) */
     unsigned short ies_len;
+    unsigned long age_ms;               /* since its last beacon/probe response:
+                                           cfg80211 keeps a BSS for 30 s */
 } b43os9_bss;
 
 /* Hardware information (diagnostics) */
