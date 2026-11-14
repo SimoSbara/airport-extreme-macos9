@@ -11,6 +11,11 @@ Usage:
 Example (from the project directory):
     python Tools/fw2c.py firmware out/b43fw.c   (done by Build/CMakeLists.txt)
 
+The four files in the directory are the default firmware. Each subdirectory
+named "fw-<version>" holding the same four files is built in as well, as an
+alternative that can be chosen by name at run time (to compare firmware
+versions on the Mac without rebuilding): b43_builtin_firmware_named().
+
 WARNING: the Broadcom firmware is NOT redistributable. The generated file
 contains the firmware: do not publish it (it is kept out of the repository).
 """
@@ -18,12 +23,12 @@ import os
 import struct
 import sys
 
-# (file name, C symbol name, expected type in the b43_fw_header header)
+# (file name, C symbol name, field of b43os9_firmware, type in the b43_fw_header)
 FILES = [
-    ("ucode5.fw",          "b43fw_ucode5",          b"u"),
-    ("pcm5.fw",            "b43fw_pcm5",            b"p"),
-    ("b0g0initvals5.fw",   "b43fw_b0g0initvals5",   b"i"),
-    ("b0g0bsinitvals5.fw", "b43fw_b0g0bsinitvals5", b"i"),
+    ("ucode5.fw",          "ucode5",          "ucode", b"u"),
+    ("pcm5.fw",            "pcm5",            "pcm",   b"p"),
+    ("b0g0initvals5.fw",   "b0g0initvals5",   "iv",    b"i"),
+    ("b0g0bsinitvals5.fw", "b0g0bsinitvals5", "bsiv",  b"i"),
 ]
 
 NL = "\r\n"  # CodeWarrior reads CRLF without problems, like the other sources
@@ -53,10 +58,36 @@ def emit_array(out, symbol, data):
     out.append("")
 
 
+def read_set(directory):
+    """The four files of a directory, or None if one is missing."""
+    files = []
+    for fname, _, _, fw_type in FILES:
+        path = os.path.join(directory, fname)
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as f:
+            data = f.read()
+        check_header(path, data, fw_type)
+        files.append(data)
+    return files
+
+
 def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     src_dir, out_path = sys.argv[1], sys.argv[2]
+
+    default = read_set(src_dir)
+    if default is None:
+        sys.exit("%s: firmware files missing" % src_dir)
+    # (name, files): the default first, then the fw-<version> subdirectories
+    sets = [("", default)]
+    for entry in sorted(os.listdir(src_dir)):
+        sub = os.path.join(src_dir, entry)
+        if entry.startswith("fw-") and os.path.isdir(sub):
+            files = read_set(sub)
+            if files is not None:
+                sets.append((entry[3:], files))
 
     out = [
         "/*",
@@ -67,35 +98,84 @@ def main():
         '#include "b43fw.h"',
         "",
     ]
-    lengths = {}
-    for fname, symbol, fw_type in FILES:
-        path = os.path.join(src_dir, fname)
-        with open(path, "rb") as f:
-            data = f.read()
-        size = check_header(fname, data, fw_type)
-        kind = "instructions" if fw_type == b"u" else ("PCM words" if fw_type == b"p" else "initvals")
-        count = size // 4 if fw_type in (b"u", b"p") else size
-        out.append("/* %s: %d byte, %d %s */" % (fname, len(data), count, kind))
-        emit_array(out, symbol, data)
-        lengths[symbol] = len(data)
+    # Identical files (the default set is usually also one of the named ones)
+    # are stored once
+    symbols = {}                # file contents -> C symbol
+    refs = []                   # per set: the symbol of each file
+    for idx, (name, files) in enumerate(sets):
+        row = []
+        for (fname, sym, _, fw_type), data in zip(FILES, files):
+            if data not in symbols:
+                symbol = "b43fw_%s" % sym if idx == 0 else "b43fw_s%d_%s" % (idx, sym)
+                size = len(data) - 8
+                kind = ("instructions" if fw_type == b"u" else
+                        ("PCM words" if fw_type == b"p" else "initvals"))
+                count = size // 4 if fw_type in (b"u", b"p") else size
+                out.append("/* %s%s: %d byte, %d %s */" %
+                           (("fw-%s/" % name) if name else "", fname, len(data), count, kind))
+                emit_array(out, symbol, data)
+                symbols[data] = symbol
+            row.append(symbols[data])
+        refs.append(row)
+
+    # The name of the default set: the named one with the same files
+    default_name = "default"
+    for idx in range(1, len(sets)):
+        if refs[idx] == refs[0]:
+            default_name = sets[idx][0]
+            break
+
+    def fill(row, files, indent):
+        lines = []
+        for (_, _, field, _), symbol, data in zip(FILES, row, files):
+            lines.append("%sfw->%s = %s;" % (indent, field, symbol))
+            lines.append("%sfw->%s_len = %dUL;" % (indent, field, len(data)))
+        return lines
+
+    out += ["void b43_builtin_firmware(b43os9_firmware *fw)", "{"]
+    out += fill(refs[0], sets[0][1], "    ")
+    out += ["}", ""]
 
     out += [
-        "void b43_builtin_firmware(b43os9_firmware *fw)",
+        "static int b43fw_same(const char *a, const char *b)",
         "{",
-        "    fw->ucode     = b43fw_ucode5;",
-        "    fw->ucode_len = %dUL;" % lengths["b43fw_ucode5"],
-        "    fw->pcm       = b43fw_pcm5;",
-        "    fw->pcm_len   = %dUL;" % lengths["b43fw_pcm5"],
-        "    fw->iv        = b43fw_b0g0initvals5;",
-        "    fw->iv_len    = %dUL;" % lengths["b43fw_b0g0initvals5"],
-        "    fw->bsiv      = b43fw_b0g0bsinitvals5;",
-        "    fw->bsiv_len  = %dUL;" % lengths["b43fw_b0g0bsinitvals5"],
+        "    while (*a && *a == *b) {",
+        "        a++;",
+        "        b++;",
+        "    }",
+        "    return *a == *b;",
+        "}",
+        "",
+        "const char *b43_builtin_firmware_name(int idx)",
+        "{",
+        "    switch (idx) {",
+        '    case 0: return "%s";' % default_name,
+    ]
+    others = [s[0] for s in sets[1:] if s[0] != default_name]
+    for idx, name in enumerate(others):
+        out.append('    case %d: return "%s";' % (idx + 1, name))
+    out += [
+        "    default: return (const char *)0;",
+        "    }",
+        "}",
+        "",
+        "int b43_builtin_firmware_named(const char *name, b43os9_firmware *fw)",
+        "{",
+    ]
+    for idx in range(1, len(sets)):
+        out.append('    if (b43fw_same(name, "%s")) {' % sets[idx][0])
+        out += fill(refs[idx], sets[idx][1], "        ")
+        out += ["        return 0;", "    }"]
+    out += [
+        "    (void)name;",
+        "    (void)fw;",
+        "    return -1;",
         "}",
         "",
     ]
     with open(out_path, "w", newline="") as f:
         f.write(NL.join(out))
-    print("Wrote %s" % out_path)
+    print("Wrote %s (%s)" % (out_path, ", ".join([default_name + " (default)"] + others)))
 
 
 if __name__ == "__main__":

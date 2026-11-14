@@ -47,6 +47,18 @@
 #define TEST_DHCP_TRIES         3
 #define TEST_DHCP_WAIT_MS       2000
 
+/* Link quality test: ARP requests to the router and the pause between them */
+#define TEST_ARP_REQUESTS       200
+#define TEST_ARP_INTERVAL_MS    50
+
+/* Load test: pings to the router, their data size and the pause between them */
+#define TEST_PING_COUNT         1000
+#define TEST_PING_BYTES         1400
+#define TEST_PING_INTERVAL_MS   5
+
+/* Register record (diagnostics): entries of 12 bytes each */
+#define TEST_IOTRACE_ENTRIES    250000UL
+
 /* 1 = print every received frame */
 #define TEST_VERBOSE_RX         0
 

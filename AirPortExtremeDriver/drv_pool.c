@@ -53,14 +53,52 @@ void drv_pool_init(void *mem, unsigned long bytes, drv_pool_stats *stats)
     stats->size = g_free->size;
 }
 
+/*
+ * Blocks from PAGE_FIT_MIN bytes to a page never cross a page boundary: a
+ * page is physically contiguous even with virtual memory on, so the DMA
+ * buffers of the stack (skb data, 1.5 to 2.5 KB) can be given to the chip
+ * in place (b43compat_dma.c) instead of through a bounce page.
+ */
+#define PAGE_BYTES      4096UL
+#define PAGE_FIT_MIN    512UL
+
+/* Bytes to skip at the start of free block b so that a block of size
+ * bytes does not cross a page; the skipped part stays a free block */
+static unsigned long page_fit_pad(const blk *b, unsigned long size)
+{
+    unsigned long u = (unsigned long)(b + 1), pad;
+
+    if (size < PAGE_FIT_MIN || size > PAGE_BYTES)
+        return 0;
+    if ((u & ~(PAGE_BYTES - 1)) == ((u + size - 1) & ~(PAGE_BYTES - 1)))
+        return 0;
+    pad = ((u & ~(PAGE_BYTES - 1)) + PAGE_BYTES) - u;
+    if (pad < BLK_MIN)
+        pad += PAGE_BYTES;
+    return pad;
+}
+
 void *drv_pool_alloc(unsigned long size)
 {
     unsigned long need = ((size + 15) & ~15UL) + sizeof(blk);
     blk **pp, *b;
 
     for (pp = &g_free; (b = *pp) != NULL; pp = &b->next) {
-        if (b->size < need)
+        unsigned long pad = page_fit_pad(b, size);
+
+        if (b->size < pad + need)
             continue;
+        if (pad) {
+            /* The head stays free, the allocation starts on a page */
+            blk *nb = (blk *)((char *)b + pad);
+            nb->size = b->size - pad;
+            nb->next = b->next;
+            nb->magic = BLK_FREE;
+            b->size = pad;
+            b->next = nb;
+            pp = &b->next;
+            b = nb;
+        }
         if (b->size - need >= BLK_MIN) {
             /* Split: the tail stays free */
             blk *rest = (blk *)((char *)b + need);

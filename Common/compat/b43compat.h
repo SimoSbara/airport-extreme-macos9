@@ -316,10 +316,26 @@ typedef struct { int dummy; } spinlock_t;
 typedef struct { int counter; } atomic_t;
 #define atomic_read(v)          ((v)->counter)
 #define atomic_set(v, i)        ((v)->counter = (i))
-#define smp_wmb()               do { } while (0)
-#define wmb()                   do { } while (0)
-#define rmb()                   do { } while (0)
-#define smp_rmb()               do { } while (0)
+/* Barriers as arch/powerpc/include/asm/barrier.h (32-bit, uniprocessor):
+ * mb/rmb/wmb order memory against the device (DMA descriptors, then the
+ * register that hands them over) and are "sync"; the smp_ ones only stop
+ * the compiler. The G4 has no lwsync: dma_rmb/dma_wmb are "sync" too. */
+#if defined(__GNUC__)
+#define b43c_hw_sync()          __asm__ __volatile__("sync" : : : "memory")
+#define b43c_compiler_barrier() __asm__ __volatile__("" : : : "memory")
+#elif defined(__MWERKS__)
+#define b43c_hw_sync()          __sync()
+#define b43c_compiler_barrier() do { } while (0)
+#else
+#define b43c_hw_sync()          do { } while (0)
+#define b43c_compiler_barrier() do { } while (0)
+#endif
+#define smp_wmb()               b43c_compiler_barrier()
+#define wmb()                   b43c_hw_sync()
+#define rmb()                   b43c_hw_sync()
+#define smp_rmb()               b43c_compiler_barrier()
+#define dma_wmb()               b43c_hw_sync()
+#define dma_rmb()               b43c_hw_sync()
 #define mmiowb()                do { } while (0)
 #define synchronize_irq(i)      do { } while (0)
 struct completion { int done; };

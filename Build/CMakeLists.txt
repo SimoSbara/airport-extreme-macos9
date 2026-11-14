@@ -28,11 +28,15 @@ foreach(f ${FIRMWARE_FILES})
         message(FATAL_ERROR "Missing firmware ${f}: see firmware/README.md")
     endif()
 endforeach()
+# Other versions to compare, in firmware/fw-<version>/: built in as well and
+# chosen by name at run time (firmware= in the driver's prefs, a question in
+# the Tester)
+file(GLOB FIRMWARE_ALT_FILES CONFIGURE_DEPENDS ${FIRMWARE_DIR}/fw-*/*.fw)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/b43fw.c
     COMMAND ${Python3_EXECUTABLE} ${TOOLS}/fw2c.py ${FIRMWARE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/b43fw.c
-    DEPENDS ${FIRMWARE_FILES} ${TOOLS}/fw2c.py)
+    DEPENDS ${FIRMWARE_FILES} ${FIRMWARE_ALT_FILES} ${TOOLS}/fw2c.py)
 
 # Options as in the Linux kernel (top-level Makefile)
 set(LINUX_CFLAGS
@@ -132,7 +136,8 @@ if(EXISTS ${OT_KERNEL_LIB})
         ${DRIVER}/drv_link.c
         ${DRIVER}/drv_env.c
         ${DRIVER}/drv_pool.c
-        ${DRIVER}/drv_prefs.c)
+        ${DRIVER}/drv_prefs.c
+        ${DRIVER}/drv_screen.c)
     target_include_directories(AirPortExtreme PRIVATE ${DRIVER} ${COMMON}/os9)
     target_compile_options(AirPortExtreme PRIVATE -std=gnu11 -Os -mtraceback=full -Wall)
     target_link_libraries(AirPortExtreme wpas linux80211 ${OT_KERNEL_LIB}

@@ -14,6 +14,15 @@ extern const unsigned char b43fw_pcm5[];
 extern const unsigned char b43fw_b0g0initvals5[];
 extern const unsigned char b43fw_b0g0bsinitvals5[];
 
+/* The default firmware: the four files in firmware/ */
 void b43_builtin_firmware(b43os9_firmware *fw);
+
+/* Other versions built in, from firmware/fw-<version>/, to compare firmware
+ * versions on the Mac without rebuilding.
+ *   name   0 = the version of the default firmware ("default" if unknown),
+ *          1.. = the other versions, NULL after the last one;
+ *   named  0 = fw filled with that version, -1 = not built in. */
+const char *b43_builtin_firmware_name(int idx);
+int b43_builtin_firmware_named(const char *name, b43os9_firmware *fw);
 
 #endif /* B43FW_H_ */

@@ -19,5 +19,11 @@ Then copy these four files from the `b43/` folder it creates into this folder:
 ucode5.fw  pcm5.fw  b0g0initvals5.fw  b0g0bsinitvals5.fw
 ```
 
+To compare firmware versions on the Mac without rebuilding, put the same
+four files of another version in a subfolder named `fw-<version>` (for
+example `fw-508.1084`). Every such subfolder is built in as well: the driver
+uses it with `firmware=<version>` in its preferences file, the Tester asks
+which one to use.
+
 The build turns them into `b43fw.c`, which ends up inside the program.
 Because of that, **do not publish binaries built with the firmware**.

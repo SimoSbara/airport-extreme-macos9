@@ -95,6 +95,20 @@ typedef struct b43os9_hwinfo {
     unsigned long  tx_ack_failures, tx_rts_failures, rx_fcs_errors;
 } b43os9_hwinfo;
 
+/* The AP we are connected to, as mac80211 sees it ("iw station dump") */
+typedef struct b43os9_station {
+    int           signal, signal_avg;         /* dBm */
+    unsigned long tx_rate, rx_rate;           /* units of 100 kbit/s */
+    unsigned long rx_packets, tx_packets;
+    unsigned long tx_retries, tx_failed;      /* retransmissions, frames given up */
+    unsigned long rx_dropped;                 /* dropped by mac80211 (duplicates, crypto...) */
+    unsigned long rx_duplicates;              /* of those: retransmissions already received */
+    unsigned long beacon_loss, rx_beacons;
+} b43os9_station;
+
+/* 0 = filled, otherwise not connected / error */
+int b43os9_get_station(b43os9 *b, b43os9_station *st);
+
 /* Ciphers (as 802.11 WLAN_CIPHER_SUITE_*) */
 #define B43OS9_CIPHER_WEP40     0x000FAC01UL
 #define B43OS9_CIPHER_TKIP      0x000FAC02UL
@@ -109,6 +123,7 @@ typedef struct b43os9_options {
     int hwcrypt;            /* 1 = hardware encryption (default, as Linux) */
     int qos;                /* 1 = QoS/WMM (default, as Linux) */
     const char *regdom;     /* ISO 3166 country ("IT", "US", ...); NULL = "00" */
+    int dma;                /* 1 = DMA transfers (needs b43_env.dma_phys), 0 = PIO */
 } b43os9_options;
 
 /* -------------------------------------------------------------------------
@@ -125,6 +140,15 @@ int  b43os9_attach(b43os9 **out, volatile unsigned char *mmio, const b43_env *en
 /* Periodic work: chip interrupts (polled), work queues, timers.
  * Call often (every few ms) from the Tester loop or from the driver. */
 void b43os9_poll(b43os9 *b);
+/* Diagnostics: some parts of b43os9_poll() only (see b43os9.c) */
+void b43os9_poll_parts(b43os9 *b, int parts);
+/* Diagnostics: records the register accesses of the stack in buf until it is
+ * full, to compare two runs offline. 12 bytes per entry: time in us (4),
+ * offset from BAR0 (2), kind (1: 0x02/0x04 read of 16/32 bits, 0x12/0x14
+ * write), unused (1), value (4), big-endian. buf = NULL stops it. The record
+ * holds everything written to the chip, encryption keys included. */
+void b43os9_iotrace(void *buf, unsigned long max_entries);
+unsigned long b43os9_iotrace_count(void);
 
 /* Brings the interface up/down (ifconfig wlan0 up/down). mac = NULL for
  * the SPROM address. */
@@ -132,6 +156,15 @@ int  b43os9_up(b43os9 *b, const unsigned char *mac);
 void b43os9_down(b43os9 *b);
 
 void b43os9_get_hwinfo(b43os9 *b, b43os9_hwinfo *info);
+
+/* Experiments (used by the Tester). The three radio/PHY values that the b43
+ * of Linux 3.2 sets differently from 5.15 on this card (see b43os9_hw.c):
+ * 0 = already set, 1 = applied now, < 0 = not running or not this card. */
+int  b43os9_radio_setup_3_2(b43os9 *b);
+/* Sets board flags (low word of the SPROM flags) before the interface goes
+ * up, as b43 does for boards with a wrong SPROM. 0 = done. */
+#define B43OS9_BFL_XTAL_NOSLOW  0x0020  /* no slow clock: fast clock always on */
+int  b43os9_set_boardflags(b43os9 *b, unsigned short set);
 
 /* -------------------------------------------------------------------------
  * Commands (as nl80211)

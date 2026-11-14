@@ -598,13 +598,23 @@ int mod_timer(struct timer_list *t, unsigned long expires)
 
 int b43compat_run_timers(unsigned long now)
 {
+    static unsigned long pass;
     struct timer_list *t;
     int ran = 0, again = 1;
 
+    /* As in Linux, a timer runs once per pass: one that its handler arms
+     * again for a time already reached waits for the next pass (there it
+     * would wait for the next tick) instead of running here forever */
+    pass++;
     while (again) {
         again = 0;
         for (t = g_timers; t; t = t->b43c_next) {
-            if (time_after_eq(now, t->expires)) {
+            if (t->b43c_pass != pass && time_after_eq(now, t->expires)) {
+                t->b43c_pass = pass;
+                if (b43compat_pr_debug >= 2)
+                    printk("b43compat: timer %08lx (expires %lu, now %lu)\n",
+                           *(const unsigned long *)(const void *)t->function,
+                           t->expires, now);
                 del_timer(t);
                 t->function(t);
                 ran++;
@@ -1272,31 +1282,4 @@ struct new_utsname *init_utsname(void)
 {
     static struct new_utsname u = { "MacOS", "9", "b43os9", "ppc" };
     return &u;
-}
-
-/* =========================================================================
- * DMA: not used (b43 runs in PIO mode, parameter pio=1)
- * ========================================================================= */
-int dma_set_mask_and_coherent(struct device *dev, u64 mask)
-{
-    (void)dev; (void)mask;
-    return -EIO;
-}
-
-void *dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *dma_handle, gfp_t flag)
-{
-    (void)dev; (void)size; (void)flag;
-    *dma_handle = 0;
-    return NULL;
-}
-
-void dma_free_coherent(struct device *dev, size_t size, void *cpu_addr, dma_addr_t dma_handle)
-{
-    (void)dev; (void)size; (void)cpu_addr; (void)dma_handle;
-}
-
-dma_addr_t dma_map_single(struct device *dev, void *ptr, size_t size, enum dma_data_direction dir)
-{
-    (void)dev; (void)ptr; (void)size; (void)dir;
-    return 0;
 }

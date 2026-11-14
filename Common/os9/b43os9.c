@@ -94,9 +94,11 @@ int b43os9_attach(b43os9 **out, volatile unsigned char *mmio, const b43_env *env
     b43compat_net_hooks.netdev_registered = os9_netdev_registered;
     b43compat_net_hooks.netdev_unregistered = os9_netdev_unregistered;
 
-    /* Module parameters, as in "modprobe b43 pio=1 ...": DMA has not yet
-     * been ported to Mac OS 9 */
-    *(int *)b43compat_param_pio = 1;
+    /* Module parameters, as in "modprobe b43 pio=1 ...": DMA when asked
+     * for and the host can give bus addresses (b43compat_dma.c) */
+    *(int *)b43compat_param_pio =
+        (opt && opt->dma && env->dma_phys && env->dma_page_alloc) ? 0 : 1;
+    printk("b43os9: %s transfers\n", *(int *)b43compat_param_pio ? "PIO" : "DMA");
     if (opt) {
         *(int *)b43compat_param_verbose = opt->verbose;
         *(int *)b43compat_param_nohwcrypt = opt->hwcrypt ? 0 : 1;
@@ -144,6 +146,37 @@ int b43os9_attach(b43os9 **out, volatile unsigned char *mmio, const b43_env *env
     printk("b43os9: interface %s ready, MAC %pM\n", b->dev->name, b->dev->dev_addr);
     *out = b;
     return 0;
+}
+
+/* Diagnostics: only some of the parts of b43os9_poll(), to find out which one
+ * has to run often (1 interrupts, 2 timers and work items, 4 supplicant,
+ * 8 deferred frees) */
+void b43os9_poll_parts(b43os9 *b, int parts)
+{
+    if (parts & 1)
+        b43compat_poll_irq();
+    if (parts & 2)
+        b43compat_run_work();
+    if ((parts & 4) && b->supp.poll)
+        b->supp.poll(b->supp.ctx);
+    if (parts & 8)
+        b43compat_rcu_process();
+}
+
+/* Diagnostics: record of the register accesses (b43compat_device.c) */
+extern void *b43compat_iotrace_buf;
+extern unsigned long b43compat_iotrace_max, b43compat_iotrace_count;
+
+void b43os9_iotrace(void *buf, unsigned long max_entries)
+{
+    b43compat_iotrace_count = 0;
+    b43compat_iotrace_max = max_entries;
+    b43compat_iotrace_buf = buf;
+}
+
+unsigned long b43os9_iotrace_count(void)
+{
+    return b43compat_iotrace_count;
 }
 
 void b43os9_poll(b43os9 *b)
@@ -508,6 +541,65 @@ int b43os9_authorize(b43os9 *b, const unsigned char *bssid)
     err = rdev_change_station(rdev, b->dev, mac, &params);
     wiphy_unlock(&rdev->wiphy);
     return err;
+}
+
+/* =========================================================================
+ * Station statistics (nl80211_get_station)
+ * ========================================================================= */
+int b43os9_get_station(b43os9 *b, b43os9_station *out)
+{
+    struct cfg80211_registered_device *rdev;
+    struct wireless_dev *wdev;
+    struct station_info sinfo;
+    u8 bssid[ETH_ALEN];
+    int err;
+
+    memset(out, 0, sizeof(*out));
+    if (!b->dev)
+        return -ENODEV;
+    wdev = b->dev->ieee80211_ptr;
+    rdev = os9_rdev(b);
+    wdev_lock(wdev);
+    if (!wdev->current_bss) {
+        wdev_unlock(wdev);
+        return -ENOTCONN;
+    }
+    memcpy(bssid, wdev->current_bss->pub.bssid, ETH_ALEN);
+    wdev_unlock(wdev);
+
+    memset(&sinfo, 0, sizeof(sinfo));
+    err = rdev_get_station(rdev, b->dev, bssid, &sinfo);
+    if (err)
+        return err;
+    out->signal = sinfo.signal;
+    out->signal_avg = sinfo.signal_avg;
+    out->tx_rate = cfg80211_calculate_bitrate(&sinfo.txrate);
+    out->rx_rate = cfg80211_calculate_bitrate(&sinfo.rxrate);
+    out->rx_packets = sinfo.rx_packets;
+    out->tx_packets = sinfo.tx_packets;
+    out->tx_retries = sinfo.tx_retries;
+    out->tx_failed = sinfo.tx_failed;
+    out->rx_dropped = sinfo.rx_dropped_misc;
+    out->beacon_loss = sinfo.beacon_loss_count;
+    out->rx_beacons = (unsigned long)sinfo.rx_beacon;
+    cfg80211_sinfo_release_content(&sinfo);
+    {
+        /* "ethtool -S wlan0": mac80211 reports the duplicates only there.
+         * Entry 2 is "rx_duplicates" (ieee80211_gstrings_sta_stats). */
+        const struct ethtool_ops *ops = b->dev->ethtool_ops;
+        u64 data[64];
+        int n;
+
+        if (ops && ops->get_sset_count && ops->get_ethtool_stats) {
+            n = ops->get_sset_count(b->dev, ETH_SS_STATS);
+            if (n > 2 && n <= (int)ARRAY_SIZE(data)) {
+                memset(data, 0, sizeof(data));
+                ops->get_ethtool_stats(b->dev, NULL, data);
+                out->rx_duplicates = (unsigned long)data[2];
+            }
+        }
+    }
+    return 0;
 }
 
 /* =========================================================================

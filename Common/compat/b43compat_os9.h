@@ -35,6 +35,9 @@ extern int b43compat_pr_debug;
  * bar0 is the MMIO mapping already set up by Mac OS ("AAPL,address"). */
 void b43compat_pci_host_init(void __iomem *bar0, const char *name);
 
+/* b43compat_dma.c: called before every register write (descriptor flush) */
+void b43compat_dma_before_write(const void __iomem *addr);
+
 /* Linux module init functions (see fs_initcall/module_init in
  * b43compat_device.h), to be called in kernel order */
 int  b43compat_initcall_cfg80211_init(void);

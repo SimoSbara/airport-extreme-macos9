@@ -9,6 +9,15 @@
  *     password=my wpa password        (omit for an open network)
  *     country=IT                      (regulatory domain, default world)
  *     memory_kb=4096                  (memory pool of the stack)
+ *     dma=1                           (0 = PIO transfers, slower)
+ *     dma_uncached=0                  (1 = descriptor rings in uncached pages)
+ *     irq=1                           (0 = no chip interrupts, poll every 10 ms)
+ *     firmware=784.2                  (another firmware version built in, see
+ *                                      firmware/README.md; default: the main one)
+ *     watchdog=0                      (1 = a timer logs where the stack is when a
+ *                                      run does not end within 5 s)
+ *     screen_log=0                    (1 = the log is also drawn on the screen:
+ *                                      it stays readable when the Mac freezes)
  *     debug=0                         (1 = diagnostics in the log, see below)
  *     verbose=1                       (b43 log level, 0..3)
  *     wpa_debug=3                     (wpa_supplicant: 0 excessive .. 5 error)
@@ -44,6 +53,9 @@ void drv_prefs_defaults(drv_prefs *p)
     p->wpa_debug = 3;           /* MSG_INFO */
     p->pr_debug = 0;
     p->debug = 0;
+    p->dma = 1;
+    p->dma_uncached = 0;
+    p->irq = 1;
 }
 
 static unsigned long parse_ulong(const char *s)
@@ -75,6 +87,18 @@ static void apply(drv_prefs *p, const char *key, const char *val)
         set_str(p->country, sizeof(p->country), val);
     else if (!strcmp(key, "memory_kb"))
         p->memory_kb = parse_ulong(val);
+    else if (!strcmp(key, "dma"))
+        p->dma = (int)parse_ulong(val);
+    else if (!strcmp(key, "dma_uncached"))
+        p->dma_uncached = (int)parse_ulong(val);
+    else if (!strcmp(key, "irq"))
+        p->irq = (int)parse_ulong(val);
+    else if (!strcmp(key, "firmware"))
+        set_str(p->firmware, sizeof(p->firmware), val);
+    else if (!strcmp(key, "screen_log"))
+        p->screen_log = (int)parse_ulong(val);
+    else if (!strcmp(key, "watchdog"))
+        p->watchdog = (int)parse_ulong(val);
     else if (!strcmp(key, "debug"))
         p->debug = (int)parse_ulong(val);
     else if (!strcmp(key, "verbose")) {

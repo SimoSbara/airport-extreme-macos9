@@ -11,6 +11,8 @@
 #include "b43.h"
 #include "phy_g.h"
 #include "lo.h"
+#include "main.h"
+#include "xmit.h"
 
 /* =========================================================================
  * Diagnostics
@@ -75,4 +77,100 @@ void b43os9_get_hwinfo(b43os9 *b, b43os9_hwinfo *info)
             info->tx_magn = phy->g->lo_control->tx_magn;
         }
     }
+}
+
+/* =========================================================================
+ * Radio setup of Linux 3.2 (experiment)
+ *
+ * For this card (G PHY rev 2, radio 2050 rev 2) the b43 of Linux 3.2, which
+ * works well on the iBook, leaves three values different from 5.15:
+ *   radio 0x7C         0x20 (b43_phy_initb6; 5.15 writes radio 0x50 instead)
+ *   PHY 0x5D           low 7 bits = 3 (b43_phy_initb6: 3.2 does it for radio
+ *                      rev <= 5, 5.15 only for rev 4 and 5)
+ *   table ORIGTR[0]    0xC480 (b43_wa_tr_ltov, the T/R switch table; 5.15
+ *                      writes 0x7654)
+ * This writes the 3.2 values after b43 has initialized the PHY, to find out
+ * whether they are what makes the AP hear our frames. b43 itself is not
+ * changed; the calibrations it ran during init used the 5.15 values.
+ * 0 = already set, 1 = applied now, < 0 = not running or another card.
+ * ========================================================================= */
+int b43os9_radio_setup_3_2(b43os9 *b)
+{
+    struct ieee80211_hw *hw;
+    struct b43_wl *wl;
+    struct b43_wldev *dev;
+    struct b43_phy *phy;
+    u16 tr, r7c, p5d;
+
+    if (!b->dev)
+        return -ENODEV;
+    hw = wiphy_to_ieee80211_hw(b->dev->ieee80211_ptr->wiphy);
+    wl = hw_to_b43_wl(hw);
+    mutex_lock(&wl->mutex);
+    dev = wl->current_dev;
+    if (!dev || b43_status(dev) < B43_STAT_STARTED) {
+        mutex_unlock(&wl->mutex);
+        return -ENODEV;
+    }
+    phy = &dev->phy;
+    if (phy->type != B43_PHYTYPE_G || phy->rev != 2 || phy->radio_ver != 0x2050 ||
+        phy->radio_rev > 2) {
+        mutex_unlock(&wl->mutex);
+        return -EINVAL;
+    }
+    b43_mac_suspend(dev);
+    tr = b43_gtab_read(dev, B43_GTAB_ORIGTR, 0);
+    r7c = b43_radio_read16(dev, 0x7C);
+    p5d = b43_phy_read(dev, 0x5D);
+    if (tr == 0xC480 && r7c == 0x20 && (p5d & 0x007F) == 0x0003) {
+        b43_mac_enable(dev);
+        mutex_unlock(&wl->mutex);
+        return 0;
+    }
+    b43_gtab_write(dev, B43_GTAB_ORIGTR, 0, 0xC480);
+    b43_radio_write16(dev, 0x7C, 0x20);
+    b43_phy_maskset(dev, 0x5D, 0xFF80, 0x0003);
+    printk("b43os9: radio setup of Linux 3.2: ORIGTR %04x -> %04x, radio 7C %04x -> %04x,"
+           " PHY 5D %04x -> %04x\n", tr, b43_gtab_read(dev, B43_GTAB_ORIGTR, 0), r7c,
+           b43_radio_read16(dev, 0x7C), p5d, b43_phy_read(dev, 0x5D));
+    b43_mac_enable(dev);
+    mutex_unlock(&wl->mutex);
+    return 1;
+}
+
+/* =========================================================================
+ * Board flags (the SPROM as b43 sees it)
+ *
+ * b43 decides some of the setup from the board flags of the SPROM, read at
+ * every interface-up, and corrects them itself for boards whose SPROM is
+ * wrong (b43_sprom_fixup). This sets more flags the same way, before the
+ * interface goes up, for what the host needs.
+ *
+ * B43OS9_BFL_XTAL_NOSLOW ("no slow clock available"): b43 then tells the
+ * firmware not to ask for the slow clock when idle (host flag DSCRQ) and
+ * keeps the fast clock on. On this card (chipcommon rev 4, PCI core rev 9)
+ * the slow clock is the PCI clock, which belongs to the host.
+ * ========================================================================= */
+int b43os9_set_boardflags(b43os9 *b, unsigned short set)
+{
+    struct ieee80211_hw *hw;
+    struct b43_wl *wl;
+    struct b43_wldev *dev;
+    u16 old;
+
+    if (!b->dev)
+        return -ENODEV;
+    hw = wiphy_to_ieee80211_hw(b->dev->ieee80211_ptr->wiphy);
+    wl = hw_to_b43_wl(hw);
+    mutex_lock(&wl->mutex);
+    dev = wl->current_dev;
+    if (!dev || !dev->dev->bus_sprom) {
+        mutex_unlock(&wl->mutex);
+        return -ENODEV;
+    }
+    old = dev->dev->bus_sprom->boardflags_lo;
+    dev->dev->bus_sprom->boardflags_lo = old | set;
+    printk("b43os9: board flags %04x -> %04x\n", old, dev->dev->bus_sprom->boardflags_lo);
+    mutex_unlock(&wl->mutex);
+    return 0;
 }

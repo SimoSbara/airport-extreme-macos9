@@ -34,6 +34,23 @@ void *b43c_memmove(void *dst, const void *src, size_t n)
     if (d == s || n == 0)
         return dst;
     if (d < s || d >= s + n) {
+        /* Forward: whole words while both sides are word aligned */
+        if ((((unsigned long)d | (unsigned long)s) & 3) == 0) {
+            u32 *dw = (u32 *)(void *)d;
+            const u32 *sw = (const u32 *)(const void *)s;
+            for (; n >= 16; n -= 16) {
+                dw[0] = sw[0];
+                dw[1] = sw[1];
+                dw[2] = sw[2];
+                dw[3] = sw[3];
+                dw += 4;
+                sw += 4;
+            }
+            for (; n >= 4; n -= 4)
+                *dw++ = *sw++;
+            d = (u8 *)dw;
+            s = (const u8 *)sw;
+        }
         while (n--)
             *d++ = *s++;
     } else {
@@ -165,12 +182,22 @@ u64 b43compat_time_us64(void)
     return g_total_us;
 }
 
-/* jiffies: a variable as in Linux, updated by b43compat_jiffies() */
-unsigned long jiffies;
+/* jiffies: a variable as in Linux, updated by b43compat_jiffies().
+ *
+ * It starts at INITIAL_JIFFIES (linux/jiffies.h: five minutes before the
+ * 32-bit wrap), not at 0. Linux code relies on it: a zeroed timestamp must
+ * look "long ago", e.g. b43's lo_measure_setup() measures the TX control
+ * values only if txctl_measured_time (0 at start) is older than
+ * jiffies - B43_LO_TXCTL_EXPIRE. Counting from 0 made that test false for
+ * the first three minutes. */
+#define B43C_INITIAL_JIFFIES ((unsigned long)(unsigned int)(-300 * HZ))
+
+unsigned long jiffies = B43C_INITIAL_JIFFIES;
 
 unsigned long b43compat_jiffies(void)
 {
-    jiffies = (unsigned long)(b43compat_time_us64() / (1000000 / HZ));
+    jiffies = B43C_INITIAL_JIFFIES +
+              (unsigned long)(b43compat_time_us64() / (1000000 / HZ));
     return jiffies;
 }
 
@@ -306,7 +333,13 @@ int b43compat_run_work(void)
 
             g_work[i] = NULL;
             w->pending = 0;
+            if (b43compat_pr_debug >= 2)
+                printk("b43compat: work %08lx (run_work at %08lx)\n",
+                       *(const unsigned long *)(const void *)w->func,
+                       *(const unsigned long *)(const void *)b43compat_run_work);
             w->func(w);
+            if (b43compat_pr_debug >= 2)
+                printk("b43compat: work done\n");
             ran++;
             /* Diagnostics: long work items are the calibrations of b43
              * (periodic work, TX power adjustment) and the scans. The code

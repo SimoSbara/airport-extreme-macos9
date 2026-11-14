@@ -121,6 +121,7 @@ static void log_putc(char c)
 {
     g_st->log_buf[g_st->log_head % g_st->log_size] = c;
     g_st->log_head++;
+    drv_screen_putc(c);                 /* screen_log=1: on the screen too */
 }
 
 static void log_puts(const char *s)
@@ -180,6 +181,145 @@ static void env_cfg_write32(void *ctx, unsigned short offset, unsigned long valu
 }
 
 /* -------------------------------------------------------------------------
+ * DMA: bus addresses of the pool
+ *
+ * The pool is resident (held) memory: its pages never move. One
+ * PrepareMemoryForIO over the whole pool, at task time, gives the physical
+ * address of every page and keeps it prepared until the driver unloads; the
+ * stack then looks addresses up in that table at any execution level.
+ * ------------------------------------------------------------------------- */
+#define PAGE_BYTES      4096UL
+#define DMA_LIMIT       0x40000000UL    /* 30-bit DMA engines (BCM4306) */
+
+static unsigned long       g_pool_base;     /* page aligned */
+static unsigned long       g_pool_pages;
+static PhysicalAddress    *g_phys;          /* one entry per page */
+static IOPreparationTable  g_iop;
+static int                 g_prepared;
+
+static unsigned long env_dma_phys(void *ctx, const void *p)
+{
+    unsigned long a = (unsigned long)p, idx;
+
+    (void)ctx;
+    if (a < g_pool_base)
+        return ~0UL;
+    idx = (a - g_pool_base) / PAGE_BYTES;
+    if (idx >= g_pool_pages)
+        return ~0UL;
+    return ((unsigned long)g_phys[idx] & ~(PAGE_BYTES - 1)) + (a & (PAGE_BYTES - 1));
+}
+
+/* Descriptor pages: carved from the pool at task time and made uncached
+ * there (SetProcessorCacheMode is a task-level call); b43 needs six (one
+ * RX and five TX rings) */
+#define DMA_PAGES       8
+
+static unsigned char *g_dma_pages;
+static unsigned char  g_dma_page_used[DMA_PAGES];
+
+static void *env_dma_page_alloc(void *ctx, unsigned long *bus)
+{
+    int i;
+
+    (void)ctx;
+    for (i = 0; i < DMA_PAGES; i++) {
+        if (!g_dma_page_used[i]) {
+            void *p = g_dma_pages + (unsigned long)i * PAGE_BYTES;
+            g_dma_page_used[i] = 1;
+            *bus = env_dma_phys(NULL, p);
+            return p;
+        }
+    }
+    return NULL;
+}
+
+static void env_dma_page_free(void *ctx, void *page)
+{
+    unsigned long i = ((unsigned char *)page - g_dma_pages) / PAGE_BYTES;
+
+    (void)ctx;
+    if (i < DMA_PAGES)
+        g_dma_page_used[i] = 0;
+}
+
+static int dma_pages_init(int uncached)
+{
+    void *raw = drv_pool_alloc((DMA_PAGES + 1) * PAGE_BYTES);
+    OSStatus err = noErr;
+
+    if (!raw)
+        return -1;
+    g_dma_pages = (unsigned char *)(((unsigned long)raw + PAGE_BYTES - 1) & ~(PAGE_BYTES - 1));
+    /* By default the pages stay cached and the stack flushes them before
+     * every write to a DMA register (b43 only writes descriptors, the chip
+     * only reads them). dma_uncached=1 changes their cache mode instead,
+     * which touches the system's memory mapping. */
+    if (uncached) {
+        FlushProcessorCache(kCurrentAddressSpaceID, g_dma_pages, DMA_PAGES * PAGE_BYTES);
+        err = SetProcessorCacheMode(kCurrentAddressSpaceID, g_dma_pages,
+                                    DMA_PAGES * PAGE_BYTES, kProcessorCacheModeInhibited);
+    }
+    g_env.dma_pages_uncached = (uncached && err == noErr);
+    drv_log("apx: DMA: descriptor pages %p: %s (%ld)\n", g_dma_pages,
+            g_env.dma_pages_uncached ? "uncached"
+                                     : "cached, flushed before each DMA register write",
+            (long)err);
+    g_env.dma_page_alloc = env_dma_page_alloc;
+    g_env.dma_page_free = env_dma_page_free;
+    return 0;
+}
+
+int drv_env_dma_init(int uncached)
+{
+    unsigned long i, runs = 1, lo = ~0UL, hi = 0, len = g_pool_pages * PAGE_BYTES;
+    OSStatus err;
+
+    if (!g_pool_pages)
+        return -1;
+    g_phys = (PhysicalAddress *)PoolAllocateResident(g_pool_pages * sizeof(PhysicalAddress), true);
+    if (!g_phys)
+        return -1;
+    memset(&g_iop, 0, sizeof(g_iop));
+    g_iop.options = kIOLogicalRanges | kIOIsInput | kIOIsOutput;
+    g_iop.addressSpace = kCurrentAddressSpaceID;
+    g_iop.mappingEntryCount = g_pool_pages;
+    g_iop.physicalMapping = g_phys;
+    g_iop.rangeInfo.range.base = (void *)g_pool_base;
+    g_iop.rangeInfo.range.length = len;
+    err = PrepareMemoryForIO(&g_iop);
+    if (err != noErr || !(g_iop.state & kIOStateDone) || g_iop.lengthPrepared != len) {
+        drv_log("apx: DMA: PrepareMemoryForIO failed (%ld, state %lu, %lu of %lu bytes)\n",
+                (long)err, (unsigned long)g_iop.state, (unsigned long)g_iop.lengthPrepared, len);
+        if (err == noErr)
+            CheckpointIO(g_iop.preparationID, 0);
+        return -1;
+    }
+    g_prepared = 1;
+    for (i = 0; i < g_pool_pages; i++) {
+        unsigned long ph = (unsigned long)g_phys[i] & ~(PAGE_BYTES - 1);
+        if (ph < lo)
+            lo = ph;
+        if (ph + PAGE_BYTES > hi)
+            hi = ph + PAGE_BYTES;
+        if (i && ph != ((unsigned long)g_phys[i - 1] & ~(PAGE_BYTES - 1)) + PAGE_BYTES)
+            runs++;
+    }
+    drv_log("apx: DMA: pool %08lx, %lu pages, bus addresses %08lx-%08lx in %lu contiguous runs\n",
+            g_pool_base, g_pool_pages, lo, hi - 1, runs);
+    if (hi > DMA_LIMIT) {
+        drv_log("apx: DMA: memory above 1 GB, out of reach of the chip: using PIO\n");
+        return -1;
+    }
+    if (dma_pages_init(uncached)) {
+        drv_log("apx: DMA: no memory for the descriptor pages: using PIO\n");
+        return -1;
+    }
+    g_env.dma_phys = env_dma_phys;
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
  * Setup (task time)
  * ------------------------------------------------------------------------- */
 int drv_env_init(RegEntryID *node, unsigned long pool_bytes, apx_status *st)
@@ -193,11 +333,15 @@ int drv_env_init(RegEntryID *node, unsigned long pool_bytes, apx_status *st)
     st->log_size = LOG_SIZE;
     st->log_head = 0;
 
-    g_pool_mem = PoolAllocateResident(pool_bytes, false);
+    /* Page aligned, whole pages (for the DMA table) */
+    pool_bytes &= ~(PAGE_BYTES - 1);
+    g_pool_mem = PoolAllocateResident(pool_bytes + PAGE_BYTES, false);
     if (!g_pool_mem)
         return -1;
+    g_pool_base = ((unsigned long)g_pool_mem + PAGE_BYTES - 1) & ~(PAGE_BYTES - 1);
+    g_pool_pages = pool_bytes / PAGE_BYTES;
     g_pool.report = pool_report;
-    drv_pool_init(g_pool_mem, pool_bytes, &g_pool);
+    drv_pool_init((void *)g_pool_base, pool_bytes, &g_pool);
     pool_publish();
 
     memset(&g_env, 0, sizeof(g_env));
@@ -215,6 +359,11 @@ int drv_env_init(RegEntryID *node, unsigned long pool_bytes, apx_status *st)
 /* Frees everything the stack allocated, and the log */
 void drv_env_free(void)
 {
+    if (g_prepared) {
+        CheckpointIO(g_iop.preparationID, 0);
+        g_prepared = 0;
+    }
+    g_env.dma_phys = NULL;
     if (g_pool_mem) {
         PoolDeallocate(g_pool_mem);
         g_pool_mem = NULL;

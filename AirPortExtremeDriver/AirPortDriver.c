@@ -14,16 +14,24 @@
  * driver of Apple's PCCardNetworkSample.
  *
  * Execution:
- *   - a Driver Services timer schedules an OT deferred task every TICK_MS;
- *     the task runs the stack: b43os9_poll() (chip interrupts are polled,
- *     as in the Tester), the connection manager, the transmit queue;
- *   - wput (any level up to deferred task) queues outbound frames on an
- *     atomic list and sends them at once if the stack is free;
+ *   - the stack runs in OT deferred tasks: b43os9_poll() (b43's interrupt
+ *     handlers, timers, work items), the connection manager, the transmit
+ *     queue. Three things schedule it:
+ *       the chip's PCI interrupt: the hardware handler only masks the
+ *         interrupt source and schedules the task, which unmasks it when
+ *         the stack has served the chip (Linux's hard handler + thread);
+ *       wput (any level up to deferred task): queues outbound frames on an
+ *         atomic list, the task hands them to mac80211 and runs b43's
+ *         transmit work right away;
+ *       a Driver Services timer every TICK_MS: Linux timers and delayed
+ *         work, and the chip too when interrupts are off (irq=0);
  *   - the stack is never entered twice: a test-and-set lock guards it.
  *   - inbound frames go up with dle_inbound() from inside the stack.
  *   - the Linux code always runs on a private 256 KB stack (on_stack):
  *     deferred tasks borrow a small system stack, and the receive path of
  *     mac80211 is deep.
+ *   - a Time Manager task watches over it: when a run does not end, it logs
+ *     where the code is (see "Watchdog").
  */
 /* Open Transport defines dev_t, uid_t and gid_t as UInt32 (STREAMS), and
  * Apple's CGBase.h pulls in newlib's sys/types.h, which would define them
@@ -41,6 +49,7 @@
 #include <OpenTransportProviders.h>
 #include <DriverServices.h>
 #include <DriverFamilyMatching.h>
+#include <Timer.h>
 #include <NameRegistry.h>
 
 #include "dle.h"
@@ -93,11 +102,23 @@ static drv_prefs          g_prefs;
 static apx_status        *g_st;
 static RegEntryID         g_node;
 
-static OTDeferredTaskRef  g_dtask;
+static OTDeferredTaskRef  g_dtask;      /* timer tick */
+static OTDeferredTaskRef  g_ktask;      /* kick: chip interrupt, wput */
 static TimerID            g_timer;
 static volatile int       g_stopping;
 static volatile int       g_want_up;    /* a client is bound (dlehw_start) */
 static UInt8              g_lock;       /* stack lock, test-and-set */
+
+/* Execution counters (debug summary) */
+static unsigned long      g_runs, g_run_max_us, g_irqs, g_kicks, g_kick_busy;
+static int                g_irq_on;     /* chip interrupt installed and in use */
+
+/* Common/compat/b43compat_dma.c (same layout) */
+struct b43compat_dma_stats {
+    unsigned long maps, direct, bounced, failures, bounce_in_use, bounce_peak, coherent;
+    unsigned long rx_seen, rx_taken, rx_recycled;
+};
+extern struct b43compat_dma_stats b43compat_dma_stats;
 
 static OTLIFO             g_txq;        /* outbound mblks, newest first */
 static SInt32             g_txq_len;
@@ -109,6 +130,8 @@ static unsigned char      g_txbuf[MAX_FRAME + 2];
 static char              *g_stack;      /* PoolAllocateResident, painted */
 static void             (*g_stack_fn)(void);
 static unsigned long      g_ticks;
+/* drv_time_ms() when the Linux code was entered, 0 = not inside (watchdog) */
+static volatile unsigned long g_busy_since;
 
 /* Called by on_stack() with r1 already on the private stack */
 void apx_stack_body(void) __attribute__((used, noinline));
@@ -133,6 +156,7 @@ static void __attribute__((noinline)) on_stack(void (*fn)(void))
     }
     g_stack_fn = fn;
     top = (char *)(((unsigned long)g_stack + STACK_SIZE) & ~15UL);
+    g_busy_since = drv_time_ms() | 1UL;
     __asm__ volatile(
         "mr 12,1\n\t"
         "mr 1,%0\n\t"
@@ -146,6 +170,7 @@ static void __attribute__((noinline)) on_stack(void (*fn)(void))
           "ctr", "lr", "cr0", "cr1", "cr5", "cr6", "cr7", "xer", "memory");
     /* The volatile FPRs are not listed: this function is never inlined and
      * keeps no floating point value across the call */
+    g_busy_since = 0;
 }
 
 static int stack_alloc(void)
@@ -248,9 +273,10 @@ static void tx_one(mblk_t *mp)
     }
 }
 
-static void tx_drain(void)
+static int tx_drain(void)
 {
     OTLink *list = OTLIFOStealList(&g_txq);
+    int n = 0;
 
     list = OTReverseList(list);         /* oldest first */
     while (list) {
@@ -259,7 +285,9 @@ static void tx_drain(void)
         mp->b_next = NULL;
         OTAtomicAdd32(-1, &g_txq_len);
         tx_one(mp);
+        n++;
     }
+    return n;
 }
 
 /* -------------------------------------------------------------------------
@@ -315,6 +343,16 @@ static void log_summary(void)
             g_st->rx_frames, g_st->rx_drops, is->bytes_received, is->receive_unknown_protos,
             is->receive_discards, is->bytes_sent, g_st->mem_used / 1024,
             g_st->stack_peak / 1024);
+    drv_log("apx: [run] %lu runs (longest %lu us), %lu interrupts, %lu kicks (%lu busy) |"
+            " DMA maps %lu: %lu direct, %lu bounced, %lu failed, bounce peak %lu\n",
+            g_runs, g_run_max_us, g_irqs, g_kicks, g_kick_busy, b43compat_dma_stats.maps,
+            b43compat_dma_stats.direct, b43compat_dma_stats.bounced,
+            b43compat_dma_stats.failures, b43compat_dma_stats.bounce_peak);
+    /* RX ring: slots b43 looked at, frames it passed up, buffers it
+     * dropped and gave back (empty header, poison, no memory) */
+    drv_log("apx: [rx ring] seen %lu, taken %lu, recycled %lu\n", b43compat_dma_stats.rx_seen,
+            b43compat_dma_stats.rx_taken, b43compat_dma_stats.rx_recycled);
+    g_run_max_us = 0;
 }
 
 /* -------------------------------------------------------------------------
@@ -373,6 +411,30 @@ static void chip_snapshot(const char *why)
     last_slept = b43compat_msleep_works;
     last_ack = hw.tx_ack_failures;
     last_fcs = hw.rx_fcs_errors;
+    {
+        /* The AP as mac80211 sees it */
+        b43os9_station sta;
+        if (b43os9_get_station(g_b43, &sta) == 0)
+            drv_log("apx: [station %s] signal %d dBm (avg %d), rate tx %lu.%lu rx %lu.%lu Mbit/s |"
+                    " tx %lu, retries %lu, failed %lu | rx %lu, dropped %lu (duplicates %lu) |"
+                    " beacons %lu, lost %lu\n", why, sta.signal, sta.signal_avg, sta.tx_rate / 10,
+                    sta.tx_rate % 10, sta.rx_rate / 10, sta.rx_rate % 10, sta.tx_packets,
+                    sta.tx_retries, sta.tx_failed, sta.rx_packets, sta.rx_dropped,
+                    sta.rx_duplicates, sta.rx_beacons, sta.beacon_loss);
+    }
+    {
+        /* Once: what b43 read from the card (board quirks, PA calibration) */
+        static int board_logged;
+        if (!board_logged && hw.core_id) {
+            board_logged = 1;
+            drv_log("apx: [board] vendor %04x type %04x rev 0x%02x, SPROM rev %d, boardflags"
+                    " %04x/%04x, antennas 0x%x, maxpwr %d, pa0b %04x %04x %04x, itssi %d,"
+                    " tx bias %d magn %d\n", hw.board_vendor, hw.board_type, hw.board_rev,
+                    hw.sprom_rev, hw.boardflags_lo, hw.boardflags_hi, hw.ant_available_bg,
+                    hw.maxpwr_bg, hw.pa0b0, hw.pa0b1, hw.pa0b2, hw.itssi_bg, hw.tx_bias,
+                    hw.tx_magn);
+        }
+    }
 }
 
 /* Every second: a connected link with no frame received for 3 s is
@@ -402,25 +464,229 @@ static void rx_watchdog(void)
 }
 
 /* -------------------------------------------------------------------------
- * The stack's clock: Driver Services timer -> OT deferred task
+ * Watchdog: where the Linux code is when it does not come back
+ *
+ * A Time Manager task, once a second. It runs at interrupt level, so it
+ * still runs when a deferred task never ends (a frozen Mac, no MacsBug).
+ * When the stack has been inside one run for WATCH_STUCK_MS it logs the
+ * return addresses found on the private stack: with the link map they give
+ * the chain of functions it is stuck in. With screen_log=1 the log is on
+ * the screen, the only place where it can still be read.
+ *
+ * Mac OS takes interrupts on the stack of the interrupted code, so the
+ * handler's own frame is on the private stack, just below the frames of the
+ * stuck code: the first frame from there whose back chain leads to the top
+ * of the private stack is the innermost one. (If the handler runs on another
+ * stack, the search starts from the deepest point ever used and the first
+ * addresses may belong to an older, deeper call.)
+ *
+ * Only with watchdog=1 in the prefs. The fragment stays loaded
+ * (ValidateHardware), so the task is never removed.
+ * ------------------------------------------------------------------------- */
+#define WATCH_STUCK_MS  5000
+#define WATCH_ADDRS     24
+
+static TMTask       g_watch;
+static int          g_watch_on;
+static volatile int g_irq_masked;       /* see the interrupt handler below */
+
+/* Does the back chain starting at p reach the first frame of the stack? */
+static int watch_chain_ok(unsigned long p, unsigned long lo, unsigned long first)
+{
+    int n;
+
+    for (n = 0; n < 400; n++) {
+        unsigned long next;
+
+        if (p == first)
+            return 1;
+        if (p < lo || p > first || (p & 3))
+            return 0;
+        next = *(const unsigned long *)p;
+        if (next <= p)
+            return 0;
+        p = next;
+    }
+    return 0;
+}
+
+static void watch_report(unsigned long stuck_ms, unsigned long irqs_per_s)
+{
+    unsigned long lo = (unsigned long)g_stack;
+    /* The frame on_stack() makes at the top */
+    unsigned long first = (((unsigned long)g_stack + STACK_SIZE) & ~15UL) - 64;
+    unsigned long sp = (unsigned long)__builtin_frame_address(0), p;
+    unsigned long addr[WATCH_ADDRS];
+    const char *from = "interrupted stack";
+    int n = 0, i;
+
+    if (sp < lo || sp >= first) {
+        for (p = lo; p < first && *(const unsigned char *)p == STACK_PAINT; p++) {
+        }
+        sp = p;
+        from = "deepest use";
+    }
+    for (p = (sp + 3) & ~3UL; p < first; p += 4)
+        if (watch_chain_ok(p, lo, first))
+            break;
+    drv_log("apx: [stuck %lu s] link %lu, runs %lu, interrupts %lu (+%lu/s), MACCTL %08lx,"
+            " IRQ reason %08lx mask %08lx | drv_log at %08lX, stack %08lX-%08lX, %s %08lX,"
+            " innermost frame %08lX\n", stuck_ms / 1000, g_st ? g_st->link_state : 0UL, g_runs,
+            g_irqs, irqs_per_s, g_mmio ? rd32(0x120) : 0UL, g_mmio ? rd32(0x128) : 0UL,
+            g_mmio ? rd32(0x12C) : 0UL, *(const unsigned long *)(const void *)drv_log, lo,
+            first + 64, from, sp, p);
+    /* Each frame holds, at offset 8, the return address its callee saved:
+     * an address inside the function the frame belongs to. The first one
+     * may be left from an earlier call. */
+    while (p < first && n < WATCH_ADDRS) {
+        addr[n++] = *(const unsigned long *)(p + 8);
+        p = *(const unsigned long *)p;
+    }
+    for (i = 0; i < n; i += 8) {
+        unsigned long a[8];
+        int k;
+
+        for (k = 0; k < 8; k++)
+            a[k] = i + k < n ? addr[i + k] : 0;
+        drv_log("apx: [stuck] return addresses %d-%d: %08lX %08lX %08lX %08lX %08lX %08lX"
+                " %08lX %08lX\n", i, i + 7, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+    }
+}
+
+static pascal void watch_task(TMTaskPtr task)
+{
+    static const unsigned long when[3] = { WATCH_STUCK_MS, 2 * WATCH_STUCK_MS, 4 * WATCH_STUCK_MS };
+    static unsigned long last_since, level, last_irqs, last_ticks, idle_s;
+    unsigned long since = g_busy_since, now = drv_time_ms();
+    unsigned long irqs = g_irqs - last_irqs;
+
+    last_irqs = g_irqs;
+    if (since != last_since) {
+        last_since = since;
+        level = 0;
+    }
+    if (since && level < 3 && now - since >= when[level]) {
+        level++;
+        watch_report(now - since, irqs);
+    }
+    /* Not inside the stack, and yet the 10 ms tick does not run: something
+     * else keeps the deferred tasks from running */
+    if (since || g_stopping || !g_dtask || g_ticks != last_ticks) {
+        idle_s = 0;
+    } else if (++idle_s == WATCH_STUCK_MS / 1000) {
+        drv_log("apx: [stalled] no timer tick for %lu s, and the stack is not running:"
+                " interrupts %lu (+%lu/s), masked %d\n", idle_s, g_irqs, irqs, g_irq_masked);
+    }
+    last_ticks = g_ticks;
+    PrimeTime((QElemPtr)task, 1000);
+}
+
+/* The routine descriptor the Time Manager calls the task through. It lives
+ * in the driver's own data: NewTimerUPP() would allocate it in the heap of
+ * whatever application is opening the port, and that heap is gone when the
+ * application quits, with the timer still firing through it. */
+static RoutineDescriptor g_watch_rd = BUILD_ROUTINE_DESCRIPTOR(uppTimerProcInfo, watch_task);
+
+/* Task time, once (watchdog=1 in the prefs) */
+static void watch_install(void)
+{
+    if (g_watch_on)
+        return;
+    OTMemzero(&g_watch, sizeof(g_watch));
+    g_watch.tmAddr = (TimerUPP)&g_watch_rd;
+    InsXTime((QElemPtr)&g_watch);
+    PrimeTime((QElemPtr)&g_watch, 1000);
+    g_watch_on = 1;
+}
+
+/* -------------------------------------------------------------------------
+ * Running the stack: timer tick, chip interrupt, kicks from wput
  * ------------------------------------------------------------------------- */
 static void arm_timer(unsigned long ms);
 
+/* Interrupt source of the card ("driver-ist"), as in Apple's Ethernet
+ * sample: our handler, the system's enabler and disabler */
+static InterruptSetMember g_ist;
+static void              *g_ist_refcon;
+static InterruptEnabler   g_ist_enable;
+static InterruptDisabler  g_ist_disable;
+static volatile int       g_irq_masked;
+
 static void stack_run(void)
 {
-    static unsigned long runs;
+    static unsigned long last_s;
+    unsigned long now_s;
 
     b43os9_poll(g_b43);
     drv_link_step(g_want_up);
-    tx_drain();
-    /* Diagnostics, on the private stack too */
-    runs++;
+    /* Frames handed to mac80211 end in b43's transmit work: run it now */
+    if (tx_drain())
+        b43os9_poll(g_b43);
+
+    now_s = drv_time_ms() / 1000;
+    if (now_s == last_s)
+        return;
+    last_s = now_s;
+
+    /* Diagnostics (debug), once a second, on the private stack too */
     if (!g_prefs.debug)
         return;
-    if (runs % 100 == 0)
-        rx_watchdog();
-    if (runs % 1000 == 0 && g_want_up)
-        chip_snapshot("10 s");
+    rx_watchdog();
+    if (now_s % 10 == 0) {
+        if (g_want_up)
+            chip_snapshot("10 s");
+        log_summary();
+    }
+}
+
+/* Deferred task level. Returns 0 if the stack was busy. */
+static int service(void)
+{
+    static unsigned long last_measure;
+    AbsoluteTime t0;
+    Duration d;
+    unsigned long now, us;
+
+    unsigned long hard = b43compat_irq_hard;
+    int from_irq = g_irq_masked;
+    static unsigned long idle_irqs;
+
+    if (g_stopping)
+        return 1;
+    if (!lock_try())
+        return 0;
+    t0 = UpTime();
+    on_stack(stack_run);
+    /* An interrupt b43 does not claim, again and again, would come back
+     * forever (shared or stuck line): give up on interrupts, keep polling */
+    if (from_irq && g_irq_on) {
+        if (b43compat_irq_hard != hard) {
+            idle_irqs = 0;
+        } else if (++idle_irqs >= 200) {
+            g_irq_on = 0;
+            g_irq_masked = 0;           /* stays disabled */
+            drv_log("apx: %lu interrupts in a row with nothing for b43: interrupts off,"
+                    " polling every %d ms\n", idle_irqs, TICK_MS);
+        }
+    }
+    /* Duration: positive values are milliseconds, negative microseconds */
+    d = AbsoluteDeltaToDuration(UpTime(), t0);
+    us = (d < 0) ? (unsigned long)(-d) : (unsigned long)d * 1000UL;
+    if (us > g_run_max_us)
+        g_run_max_us = us;
+    g_runs++;
+    now = drv_time_ms();
+    if (now - last_measure >= 1000) {
+        last_measure = now;
+        stack_measure();
+    }
+    lock_release();
+    /* The chip has been served: its interrupt may come again */
+    if (g_irq_masked && !g_stopping) {
+        g_irq_masked = 0;
+        g_ist_enable(g_ist, g_ist_refcon);
+    }
+    return 1;
 }
 
 static pascal void tick(void *arg)
@@ -428,15 +694,68 @@ static pascal void tick(void *arg)
     (void)arg;
     if (g_stopping)
         return;
-    if (lock_try()) {
-        on_stack(stack_run);
-        if (++g_ticks % 100 == 0)
-            stack_measure();
-        if (g_prefs.debug && g_ticks % 1000 == 0)
-            log_summary();
-        lock_release();
-    }
+    (void)service();
+    g_ticks++;
     arm_timer(TICK_MS);
+}
+
+static pascal void kick(void *arg)
+{
+    (void)arg;
+    g_kicks++;
+    if (!service())
+        g_kick_busy++;              /* the next tick takes it */
+}
+
+/* Hardware interrupt level: no chip access here (the stack may be in the
+ * middle of an SSB core switch). Mask the source, the task does the rest. */
+static InterruptMemberNumber chip_isr(InterruptSetMember member, void *refCon, UInt32 count)
+{
+    (void)member;
+    (void)refCon;
+    (void)count;
+    g_ist_disable(g_ist, g_ist_refcon);
+    g_irq_masked = 1;
+    g_irqs++;
+    if (!g_stopping && g_ktask) {
+        OTEnterInterrupt();
+        OTScheduleDeferredTask(g_ktask);
+        OTLeaveInterrupt();
+    }
+    return kIsrIsComplete;
+}
+
+/* Task level, once */
+static int irq_install(void)
+{
+    ISTProperty ist;
+    RegPropertyValueSize size = sizeof(ist);
+    InterruptHandler old = NULL;
+    OSStatus err;
+
+    OTMemzero(&ist, sizeof(ist));
+    err = RegistryPropertyGet(&g_node, kISTPropertyName, &ist, &size);
+    if (err != noErr || size < sizeof(InterruptSetMember)) {
+        drv_log("apx: no interrupt source (driver-ist: %ld): polling every %d ms\n",
+                (long)err, TICK_MS);
+        return -1;
+    }
+    g_ist = ist[kISTChipInterruptSource];
+    err = GetInterruptFunctions(g_ist.setID, g_ist.member, &g_ist_refcon, &old,
+                                &g_ist_enable, &g_ist_disable);
+    if (err != noErr || !g_ist_enable || !g_ist_disable) {
+        drv_log("apx: GetInterruptFunctions: %ld: polling every %d ms\n", (long)err, TICK_MS);
+        return -1;
+    }
+    err = InstallInterruptFunctions(g_ist.setID, g_ist.member, g_ist_refcon, chip_isr,
+                                    g_ist_enable, g_ist_disable);
+    if (err != noErr) {
+        drv_log("apx: InstallInterruptFunctions: %ld: polling every %d ms\n", (long)err, TICK_MS);
+        return -1;
+    }
+    drv_log("apx: chip interrupt: set %p member %ld (previous handler %p)\n",
+            (void *)g_ist.setID, (long)g_ist.member, (void *)old);
+    return 0;
 }
 
 /* Secondary interrupt level */
@@ -606,10 +925,8 @@ static int apx_wput(queue_t *q, mblk_t *mp)
     }
     OTAtomicAdd32(1, &g_txq_len);
     OTLIFOEnqueue(&g_txq, (OTLink *)mp);
-    if (lock_try()) {
-        on_stack(tx_drain);
-        lock_release();
-    }
+    if (g_ktask && !g_stopping)
+        OTScheduleDeferredTask(g_ktask);
     return 0;
 }
 
@@ -666,7 +983,7 @@ static struct streamtab apx_streamtab = { &apx_rinit, &apx_winit, NULL, NULL };
 
 static install_info apx_install_info = {
     &apx_streamtab,
-    kOTModIsDriver | kOTModUpperIsDLPI,
+    kOTModIsDriver | kOTModUpperIsDLPI | kOTModUsesInterrupts,
     SQLVL_MODULE,
     NULL,
     0,
@@ -721,6 +1038,10 @@ static int attach_stack(void)
     if (drv_env_init(&g_node, g_prefs.memory_kb * 1024UL, g_st))
         return -1;
     publish_status();
+    if (g_prefs.screen_log && drv_screen_init())
+        g_prefs.screen_log = 0;         /* screen not usable (depth, no device) */
+    if (g_prefs.watchdog)
+        watch_install();
 
     drv_log("AirPort Extreme driver 1.0d1 - Linux 5.15 wireless stack on Open Transport\n");
     if (prefs_err)
@@ -730,6 +1051,8 @@ static int attach_stack(void)
                 g_prefs.ssid, g_prefs.password[0] ? "password set" : "no password",
                 g_prefs.country[0] ? g_prefs.country : "00", g_prefs.memory_kb,
                 g_prefs.debug ? ", debug log on" : "");
+    if (!g_prefs.dma || !g_prefs.irq)
+        drv_log("apx: dma=%d irq=%d\n", g_prefs.dma, g_prefs.irq);
 
     err = RegistryPropertyGet(&g_node, "AAPL,address", (void *)&mmio, &size);
     if (err != noErr || !mmio) {
@@ -744,9 +1067,17 @@ static int attach_stack(void)
     opt.hwcrypt = 1;
     opt.qos = 1;
     opt.regdom = g_prefs.country[0] ? g_prefs.country : NULL;
+    opt.dma = g_prefs.dma && drv_env_dma_init(g_prefs.dma_uncached) == 0;
     wpa_debug_level = g_prefs.wpa_debug;
 
     b43_builtin_firmware(&fw);
+    if (!g_prefs.firmware[0])
+        drv_log("apx: firmware %s\n", b43_builtin_firmware_name(0));
+    else if (b43_builtin_firmware_named(g_prefs.firmware, &fw) == 0)
+        drv_log("apx: firmware %s (firmware= in the prefs)\n", g_prefs.firmware);
+    else
+        drv_log("apx: firmware \"%s\" is not built in: using %s\n", g_prefs.firmware,
+                b43_builtin_firmware_name(0));
     rc = b43os9_attach(&g_b43, mmio, drv_env(), &fw, &opt, drv_link_events());
     if (rc != B43OS9_OK) {
         drv_log("apx: b43os9_attach failed: %d\n", rc);
@@ -766,7 +1097,7 @@ static void attach_on_stack(void)
 static void terminate_on_stack(void)
 {
     drv_link_step(0);                   /* interface down */
-    tx_drain();                         /* drops what is left */
+    (void)tx_drain();                   /* drops what is left */
 }
 
 Boolean InitStreamModule(void *portInfo)
@@ -785,6 +1116,8 @@ Boolean InitStreamModule(void *portInfo)
             return false;
         }
         g_attached = 1;
+        if (g_prefs.irq)
+            g_irq_on = irq_install() == 0;
     } else {
         drv_log("apx: Open Transport reloads the driver\n");
     }
@@ -811,7 +1144,12 @@ Boolean InitStreamModule(void *portInfo)
     g_want_up = 0;
     g_stopping = 0;
     g_dtask = OTCreateDeferredTask(tick, NULL);
+    g_ktask = OTCreateDeferredTask(kick, NULL);
     arm_timer(TICK_MS);
+    if (g_irq_on) {
+        g_irq_masked = 0;
+        g_ist_enable(g_ist, g_ist_refcon);
+    }
     return true;
 }
 
@@ -819,10 +1157,16 @@ void TerminateStreamModule(void *portInfo)
 {
     (void)portInfo;
     g_stopping = 1;
+    if (g_irq_on)
+        g_ist_disable(g_ist, g_ist_refcon);
     CancelTimer(g_timer, NULL);
     if (g_dtask) {
         OTDestroyDeferredTask(g_dtask);
         g_dtask = 0;
+    }
+    if (g_ktask) {
+        OTDestroyDeferredTask(g_ktask);
+        g_ktask = 0;
     }
 
     /* Task level: no deferred task can be holding the lock now */

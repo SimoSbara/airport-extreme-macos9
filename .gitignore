@@ -42,3 +42,11 @@ Universal/
 Open Transport.sit
 PCCardNetworkSample.zip
 PCCardNetworkSample/
+
+# Linux reference outputs from the iBook (they contain MAC addresses)
+dmesg.txt
+dmesg-debug.txt
+station.txt
+
+# Register records of the Tester (they hold session keys and MAC addresses)
+*.io

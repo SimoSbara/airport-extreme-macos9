@@ -17,9 +17,35 @@ Tested on an iBook G4 (BCM4306 rev 3, Apple 106B:004E) running Mac OS 9:
 - [x] WPA2-PSK (4-way handshake, hardware CCMP)
 - [x] encrypted data in both directions (DHCP)
 - [x] Open Transport driver: TCP/IP (DHCP or manual), AppleTalk, FTP transfers
-- [ ] performance: real interrupt handler (today the chip is polled every
-      10 ms) and DMA (today PIO), so transfers are slow
-- [ ] control panel / menu utility (today: a preferences file)
+- [x] chip interrupts and DMA transfers (`irq=0` / `dma=0` go back to
+      polling and PIO)
+- [ ] throughput: see "Known limitation" below
+- [ ] utility to choose the network (today: a preferences file)
+
+### Known limitation: throughput
+
+The link works but is slow (a few KB/s). The access point often does not
+hear the acknowledgements the card sends for the frames it receives, sends
+every frame again several times and falls back to 1 Mbit/s. Linux 3.2 on the
+same iBook, same place and same access point, runs at 24-36 Mbit/s.
+
+What has been ruled out so far, each with a test on the iBook:
+
+- DMA against PIO, chip interrupts against polling: same behaviour.
+- The firmware version (784.2 against 508.1084, the one Linux 3.2 used).
+- Which antenna receives and which one sends the acknowledgements.
+- The three radio setup values that b43 of Linux 3.2 writes differently
+  from 5.15 for this card (G PHY rev 2, radio 2050 rev 2), applied after
+  the initialization.
+- The "no slow clock" board flag, the Power Manager idling the processor,
+  the card's own MAC address against a locally administered one.
+
+The Tester (`AirPortTester`) has the tools used for these measurements: a
+choice of firmware, an ARP and a ping test that count how many copies of
+each frame the access point had to send, different ways of serving the
+card, and a record of the register accesses. In one session it ran like
+Linux (210 KB/s, next to no repeated frames); the same program later ran
+as slowly as the driver, so the cause is still unknown. Help is welcome.
 
 ## Layout
 
@@ -69,11 +95,20 @@ the Tester is built.
 4. `AirPortStatus` shows the connection and saves the driver's log.
 
 The password is stored in clear text in that file until the utility exists.
+`dma=0` makes the chip use PIO transfers instead of DMA, `irq=0` turns off
+the chip interrupt (the driver then polls every 10 ms).
 With `debug=1` the log also traces the dialogue with Open Transport, the
 first frames, and the chip and link counters every 10 s; `verbose=` (b43,
 0..3), `pr_debug=` (mac80211) and `wpa_debug=` (wpa_supplicant) tune the
 other messages. `OTCheck` lists the Open Transport ports, loads TCP/IP and
 prints the error it returns, if any.
+
+If the Mac freezes, `screen_log=1` also draws the log on the screen, where
+it can still be read (and photographed). `watchdog=1` adds a `[stuck]` line
+with the return addresses of the code that does not come back: the link map
+of the build (`AirPortExtreme.map`) turns them into function names.
+`firmware=<version>` selects another firmware version built into the driver
+(see [firmware/README.md](firmware/README.md)).
 
 Note for Retro68 users writing Open Transport modules: GCC ignores the
 `#pragma options align=power` that `OpenTransportProtocol.h` uses for

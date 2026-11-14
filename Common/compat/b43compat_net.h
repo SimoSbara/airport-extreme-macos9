@@ -139,9 +139,9 @@ static inline void change_bit(int nr, volatile unsigned long *addr)
 #define __test_and_clear_bit(nr, a) test_and_clear_bit(nr, a)
 #define clear_bit_unlock(nr, a) clear_bit(nr, a)
 #define test_and_set_bit_lock(nr, a) test_and_set_bit(nr, a)
-#define smp_mb__before_atomic() do { } while (0)
-#define smp_mb__after_atomic()  do { } while (0)
-#define smp_mb()                do { } while (0)
+#define smp_mb__before_atomic() b43c_compiler_barrier()
+#define smp_mb__after_atomic()  b43c_compiler_barrier()
+#define smp_mb()                b43c_compiler_barrier()
 #define smp_store_release(p, v) (*(p) = (v))
 #define smp_load_acquire(p)     (*(p))
 
@@ -266,6 +266,7 @@ struct timer_list {
     /* Mac OS 9 */
     int b43c_armed;
     struct timer_list *b43c_next;
+    unsigned long b43c_pass;            /* last b43compat_run_timers() pass it ran in */
 };
 void timer_setup(struct timer_list *t, void (*fn)(struct timer_list *), unsigned int flags);
 int  mod_timer(struct timer_list *t, unsigned long expires);
@@ -774,7 +775,7 @@ static inline int PTR_ERR_OR_ZERO(const void *ptr) { return IS_ERR(ptr) ? (int)P
 #define BUILD_BUG_ON_MSG(c, m)  BUILD_BUG_ON(c)
 #define BUILD_BUG()             do { } while (0)
 #define typecheck(type, x)      1
-#define barrier()               do { } while (0)
+#define barrier()               b43c_compiler_barrier()
 #define offsetofend(TYPE, MEMBER) (offsetof(TYPE, MEMBER) + sizeof(((TYPE *)0)->MEMBER))
 #define sizeof_field(TYPE, MEMBER) sizeof((((TYPE *)0)->MEMBER))
 #define struct_size(p, member, count) (sizeof(*(p)) + sizeof(*(p)->member) * (count))
@@ -1505,7 +1506,7 @@ struct va_format { const char *fmt; va_list *va; };
 #define DUMP_PREFIX_OFFSET      2
 void print_hex_dump(const char *level, const char *prefix_str, int prefix_type,
                     int rowsize, int groupsize, const void *buf, size_t len, bool ascii);
-#define mb()                    do { } while (0)
+#define mb()                    b43c_hw_sync()
 #define upper_32_bits(n)        ((u32)(((u64)(n)) >> 32))
 #define lower_32_bits(n)        ((u32)(n))
 long simple_strtol(const char *cp, char **endp, unsigned int base);
@@ -1528,17 +1529,35 @@ long simple_strtol(const char *cp, char **endp, unsigned int base);
 #define BCMA_CHIP_ID_BCM43228   43228
 #define BCMA_CHIP_ID_BCM4331    0x4331
 
-/* linux/dma-mapping.h. b43 uses PIO (parameter pio=1): these functions
- * exist for linking; dma_set_mask fails and b43 does not use DMA. */
+/* linux/dma-mapping.h (b43compat_dma.c). Available when the host gives
+ * physical addresses (b43_env.dma_phys); otherwise dma_set_mask fails and
+ * b43 must run in PIO mode. Mac OS 9 PowerPC machines have coherent PCI DMA
+ * (as for Linux on PowerMac): mappings are physical addresses, the syncs
+ * only matter for bounce buffers (buffers not physically contiguous). */
 enum dma_data_direction { DMA_BIDIRECTIONAL = 0, DMA_TO_DEVICE = 1, DMA_FROM_DEVICE = 2, DMA_NONE = 3 };
 #define GFP_DMA                 0x01
+#define DMA_MAPPING_ERROR       (~(dma_addr_t)0)
 int   dma_set_mask_and_coherent(struct device *dev, u64 mask);
 void *dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *dma_handle, gfp_t flag);
 void  dma_free_coherent(struct device *dev, size_t size, void *cpu_addr, dma_addr_t dma_handle);
 dma_addr_t dma_map_single(struct device *dev, void *ptr, size_t size, enum dma_data_direction dir);
-#define dma_unmap_single(d, a, s, dir)              do { } while (0)
-#define dma_sync_single_for_cpu(d, a, s, dir)       do { } while (0)
-#define dma_sync_single_for_device(d, a, s, dir)    do { } while (0)
-#define dma_mapping_error(d, a)                     ((a) == 0)
+void  dma_unmap_single(struct device *dev, dma_addr_t addr, size_t size, enum dma_data_direction dir);
+void  dma_sync_single_for_cpu(struct device *dev, dma_addr_t addr, size_t size, enum dma_data_direction dir);
+void  dma_sync_single_for_device(struct device *dev, dma_addr_t addr, size_t size, enum dma_data_direction dir);
+#define dma_mapping_error(d, a)                     ((a) == DMA_MAPPING_ERROR)
+
+/* Diagnostics for the host */
+struct b43compat_dma_stats {
+    unsigned long maps;             /* dma_map_single calls */
+    unsigned long direct;           /* ... mapped in place */
+    unsigned long bounced;          /* ... copied to a bounce page */
+    unsigned long failures;         /* ... refused (no bounce page free, too big) */
+    unsigned long bounce_in_use, bounce_peak;
+    unsigned long coherent;         /* dma_alloc_coherent blocks in use */
+    /* b43's RX ring (dma_rx): buffers looked at (sync_for_cpu), handed to
+     * mac80211 (unmap), dropped and given back to the chip (sync_for_device) */
+    unsigned long rx_seen, rx_taken, rx_recycled;
+};
+extern struct b43compat_dma_stats b43compat_dma_stats;
 
 #endif /* B43COMPAT_NET_H_ */

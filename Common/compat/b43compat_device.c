@@ -351,7 +351,11 @@ void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long maxlen)
 }
 
 /* =========================================================================
- * Registers (arch/powerpc/kernel/iomap.c): little-endian + eieio
+ * Registers: arch/powerpc/include/asm/io.h (in_le32/out_le32 & co.).
+ * As in Linux, every access starts with "sync", so the device sees all
+ * earlier memory writes (DMA descriptors) before the register write that
+ * hands them over; reads end with twi+isync, so nothing later runs before
+ * the value has arrived.
  * ========================================================================= */
 static void io_barrier(void)
 {
@@ -362,45 +366,128 @@ static void io_barrier(void)
 #endif
 }
 
+#if defined(__GNUC__) && (defined(__PPC__) || defined(__powerpc__))
+#define B43C_PPC_IO 1
+#endif
+
+/*
+ * Diagnostics: a record of the register accesses (what the stack tells the
+ * chip, and when), to compare two runs offline. Off unless the host gives a
+ * buffer (b43os9_iotrace). kind: 0x02/0x04 read of 16/32 bits, 0x12/0x14
+ * write. A read that returns what the same register returned the last time
+ * is not recorded (the interrupt polling). The record stops when it is full.
+ */
+struct b43compat_iotrace_entry {
+    u32 t_us;                           /* b43compat_time_us64(), low word */
+    u16 offset;                         /* from BAR0 */
+    u8  kind;
+    u8  core;                           /* not used */
+    u32 value;
+};
+
+struct b43compat_iotrace_entry *b43compat_iotrace_buf;
+unsigned long b43compat_iotrace_max, b43compat_iotrace_count;
+
+static void b43c_iotrace(u8 kind, const void __iomem *addr, u32 value)
+{
+    static u32 last_read[0x1000 / 2];
+    struct b43compat_iotrace_entry *e;
+    unsigned long off;
+
+    if (!b43compat_iotrace_buf || b43compat_iotrace_count >= b43compat_iotrace_max)
+        return;
+    off = (unsigned long)addr - (unsigned long)b43compat_pci_host.b43c_bar0;
+    if (off >= 0x1000)
+        return;
+    if (!(kind & 0x10)) {
+        if (last_read[off / 2] == value + 1)
+            return;
+        last_read[off / 2] = value + 1;     /* 0 = never read */
+    }
+    e = &b43compat_iotrace_buf[b43compat_iotrace_count++];
+    e->t_us = (u32)b43compat_time_us64();
+    e->offset = (u16)off;
+    e->kind = kind;
+    e->core = 0;
+    e->value = value;
+}
+
 u8 ioread8(const void __iomem *addr)
 {
-    u8 v = *(const volatile u8 *)addr;
+    u8 v;
+#ifdef B43C_PPC_IO
+    __asm__ __volatile__("sync; lbz%U1%X1 %0,%1; twi 0,%0,0; isync"
+                         : "=r"(v) : "m"(*(const volatile u8 *)addr) : "memory");
+#else
+    v = *(const volatile u8 *)addr;
     io_barrier();
+#endif
     return v;
 }
 
 u16 ioread16(const void __iomem *addr)
 {
-    u16 v = *(const volatile u16 *)addr;
+    u16 v;
+#ifdef B43C_PPC_IO
+    __asm__ __volatile__("sync; lhbrx %0,0,%1; twi 0,%0,0; isync"
+                         : "=r"(v) : "r"(addr) : "memory");
+#else
+    v = le16_to_cpu(*(const volatile u16 *)addr);
     io_barrier();
+#endif
     b43compat_entropy_add(v);
-    return le16_to_cpu(v);
+    b43c_iotrace(0x02, addr, v);
+    return v;
 }
 
 u32 ioread32(const void __iomem *addr)
 {
-    u32 v = *(const volatile u32 *)addr;
+    u32 v;
+#ifdef B43C_PPC_IO
+    __asm__ __volatile__("sync; lwbrx %0,0,%1; twi 0,%0,0; isync"
+                         : "=r"(v) : "r"(addr) : "memory");
+#else
+    v = le32_to_cpu(*(const volatile u32 *)addr);
     io_barrier();
+#endif
     b43compat_entropy_add(v);
-    return le32_to_cpu(v);
+    b43c_iotrace(0x04, addr, v);
+    return v;
 }
 
 void iowrite8(u8 value, void __iomem *addr)
 {
+#ifdef B43C_PPC_IO
+    __asm__ __volatile__("sync; stb%U0%X0 %1,%0"
+                         : "=m"(*(volatile u8 *)addr) : "r"(value) : "memory");
+#else
     *(volatile u8 *)addr = value;
     io_barrier();
+#endif
 }
 
 void iowrite16(u16 value, void __iomem *addr)
 {
+    b43c_iotrace(0x12, addr, value);
+    b43compat_dma_before_write(addr);
+#ifdef B43C_PPC_IO
+    __asm__ __volatile__("sync; sthbrx %0,0,%1" : : "r"(value), "r"(addr) : "memory");
+#else
     *(volatile u16 *)addr = cpu_to_le16(value);
     io_barrier();
+#endif
 }
 
 void iowrite32(u32 value, void __iomem *addr)
 {
+    b43c_iotrace(0x14, addr, value);
+    b43compat_dma_before_write(addr);
+#ifdef B43C_PPC_IO
+    __asm__ __volatile__("sync; stwbrx %0,0,%1" : : "r"(value), "r"(addr) : "memory");
+#else
     *(volatile u32 *)addr = cpu_to_le32(value);
     io_barrier();
+#endif
 }
 
 /* _rep: same register read/written count times, without byte swapping.
@@ -421,6 +508,7 @@ void ioread16_rep(const void __iomem *addr, void *buf, unsigned long count)
     u8 *b = (u8 *)buf;
     u16 w;
     b43compat_pio_reads++;
+    wmb();                              /* as Linux's _insw_ns: sync first */
     while (count--) {
         w = *(const volatile u16 *)addr;
         io_barrier();
@@ -435,6 +523,7 @@ void ioread32_rep(const void __iomem *addr, void *buf, unsigned long count)
 {
     u8 *b = (u8 *)buf;
     u32 w;
+    wmb();
     while (count--) {
         w = *(const volatile u32 *)addr;
         io_barrier();
@@ -457,6 +546,7 @@ void iowrite8_rep(void __iomem *addr, const void *buf, unsigned long count)
 void iowrite16_rep(void __iomem *addr, const void *buf, unsigned long count)
 {
     const u8 *b = (const u8 *)buf;
+    wmb();
     while (count--) {
         *(volatile u16 *)addr = (u16)(((u16)b[0] << 8) | b[1]);
         io_barrier();
@@ -467,6 +557,7 @@ void iowrite16_rep(void __iomem *addr, const void *buf, unsigned long count)
 void iowrite32_rep(void __iomem *addr, const void *buf, unsigned long count)
 {
     const u8 *b = (const u8 *)buf;
+    wmb();
     while (count--) {
         *(volatile u32 *)addr = ((u32)b[0] << 24) | ((u32)b[1] << 16) |
                                 ((u32)b[2] << 8) | (u32)b[3];
