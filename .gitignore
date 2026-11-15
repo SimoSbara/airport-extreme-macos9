@@ -50,3 +50,4 @@ station.txt
 
 # Register records of the Tester (they hold session keys and MAC addresses)
 *.io
+__pycache__/

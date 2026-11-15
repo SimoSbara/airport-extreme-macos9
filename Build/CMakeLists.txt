@@ -137,7 +137,9 @@ if(EXISTS ${OT_KERNEL_LIB})
         ${DRIVER}/drv_env.c
         ${DRIVER}/drv_pool.c
         ${DRIVER}/drv_prefs.c
-        ${DRIVER}/drv_screen.c)
+        ${DRIVER}/drv_screen.c
+        ${DRIVER}/icon_driver.r
+        ${DRIVER}/AirPortDriver.r)
     target_include_directories(AirPortExtreme PRIVATE ${DRIVER} ${COMMON}/os9)
     target_compile_options(AirPortExtreme PRIVATE -std=gnu11 -Os -mtraceback=full -Wall)
     target_link_libraries(AirPortExtreme wpas linux80211 ${OT_KERNEL_LIB}
@@ -162,3 +164,34 @@ add_application(AirPortStatus
 target_include_directories(AirPortStatus PRIVATE ${DRIVER})
 target_compile_options(AirPortStatus PRIVATE -std=gnu11 -Os -mtraceback=full -Wall)
 target_link_libraries(AirPortStatus NameRegistryLib)
+
+# ---------------------------------------------------------------------------
+# The utility: "AirPort Extreme" (choose the network) and "AirPort Extreme
+# Startup" (Startup Items: gives the driver the password from the Keychain)
+# ---------------------------------------------------------------------------
+set(UTILITY ${CMAKE_CURRENT_SOURCE_DIR}/../AirPortExtremeUtility)
+set(UTILITY_COMMON
+    ${UTILITY}/apx_client.c
+    ${UTILITY}/apx_prefs.c
+    ${UTILITY}/apx_keychain.c)
+
+add_application(AirPortExtremeUtility
+    ${UTILITY}/AirPortUtility.c
+    ${UTILITY}/apx_join.c
+    ${UTILITY_COMMON}
+    ${UTILITY}/AirPortUtility.r
+    ${UTILITY}/icon_app.r
+    CREATOR "APXu")
+target_include_directories(AirPortExtremeUtility PRIVATE ${UTILITY} ${DRIVER})
+target_compile_options(AirPortExtremeUtility PRIVATE -std=gnu11 -Os -mtraceback=full -Wall -Wno-pointer-sign)
+target_link_libraries(AirPortExtremeUtility NameRegistryLib KeychainLib AppearanceLib)
+
+add_application(AirPortExtremeStartup
+    ${UTILITY}/AirPortStartup.c
+    ${UTILITY_COMMON}
+    ${UTILITY}/AirPortStartup.r
+    ${UTILITY}/icon_startup.r
+    CREATOR "APXs")
+target_include_directories(AirPortExtremeStartup PRIVATE ${UTILITY} ${DRIVER})
+target_compile_options(AirPortExtremeStartup PRIVATE -std=gnu11 -Os -mtraceback=full -Wall -Wno-pointer-sign)
+target_link_libraries(AirPortExtremeStartup NameRegistryLib KeychainLib)

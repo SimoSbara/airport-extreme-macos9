@@ -20,7 +20,7 @@ Tested on an iBook G4 (BCM4306 rev 3, Apple 106B:004E) running Mac OS 9:
 - [x] chip interrupts and DMA transfers (`irq=0` / `dma=0` go back to
       polling and PIO)
 - [ ] throughput: see "Known limitation" below
-- [ ] utility to choose the network (today: a preferences file)
+- [x] utility to choose the network (`AirPort Extreme`), passwords in the Keychain
 
 ### Known limitation: throughput
 
@@ -58,6 +58,7 @@ as slowly as the driver, so the cause is still unknown. Help is welcome.
 | `Common/wpa/os9` | wpa_supplicant port (os, eloop, supplicant glue) |
 | `AirPortExtremeTester` | test application |
 | `AirPortExtremeDriver` | Open Transport driver (`ndrv`, DLPI through DLPISupportLib), `AirPortStatus` (state and log) and `OTCheck` (Open Transport diagnostics) |
+| `AirPortExtremeUtility` | the `AirPort Extreme` application (choose the network, passwords in the Keychain) and `AirPort Extreme Startup` |
 | `Build` | build with Retro68 |
 | `Tools` | scripts that copy the Linux/wpa_supplicant sources into `Common` |
 | `firmware` | the Broadcom firmware goes here (not included) |
@@ -83,24 +84,35 @@ the Tester is built.
 ### Using the driver
 
 1. Put `AirPortExtreme` in the Extensions folder.
-2. Create a text file named `AirPort Extreme Prefs` in the Preferences
-   folder:
-   ```
-   ssid=MyNetwork
-   password=my wpa password
-   country=IT
-   ```
+2. Put `AirPort Extreme Startup` in the Startup Items folder.
 3. Restart and choose the AirPort Extreme port ("Ethernet Slot B" on an
    iBook G4) in the TCP/IP control panel.
-4. `AirPortStatus` shows the connection (state, signal, rates, why the last
-   attempt failed) and saves the driver's log. It then asks the driver for a
-   scan, lists the networks found and can join another network, disconnect,
-   or turn AirPort off and on (`/off`, `/on`, `/disconnect`): a test of the
-   command interface the utility will use (see `apx_status.h`). The change
-   lasts until the next restart; `power=0` in the prefs starts with AirPort
-   off.
+4. Open the `AirPort Extreme` application, choose the network and type its
+   password.
 
-The password is stored in clear text in that file until the utility exists.
+The application shows the connection and the signal, the networks in range
+(double-click one to join it), joins a network that is not in the list
+(Other...), turns AirPort off and on, and forgets remembered networks
+(Networks menu). Passwords go to the Keychain (service "AirPort Extreme").
+The network to join at startup, the remembered networks and the AirPort
+on/off state go to the `AirPort Extreme Prefs` text file in the Preferences
+folder, the one the driver reads when it starts. The driver cannot read the
+Keychain: `AirPort Extreme Startup` gives it the password at startup, and
+asks for the keychain password if the keychain is locked.
+
+`AirPortStatus` shows the connection (state, signal, rates, why the last
+attempt failed) and saves the driver's log. It then asks the driver for a
+scan and can send it every command (`/off`, `/on`, `/disconnect`, or a
+network to join): a test of the command interface (see `apx_status.h`).
+
+The preferences file can also be written by hand (one `key=value` per
+line); the application keeps the lines it does not manage:
+```
+ssid=MyNetwork
+country=IT
+```
+A `password=` line works too, but the application moves it to the Keychain
+the first time it runs. `power=0` starts with AirPort off.
 `dma=0` makes the chip use PIO transfers instead of DMA, `irq=0` turns off
 the chip interrupt (the driver then polls every 10 ms).
 With `debug=1` the log also traces the dialogue with Open Transport, the

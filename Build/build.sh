@@ -23,7 +23,8 @@ cd "$(dirname "$0")/.."
 # Sources: Common, Tester (without Old), Build
 tar cf - --exclude='AirPortExtremeTester/Old' --exclude='AirPortExtremeTester/cwprobe' \
     --exclude='*.mcp' --exclude='*.xml' --exclude='Build/out' \
-    Common AirPortExtremeTester AirPortExtremeDriver Build Tools/fw2c.py firmware | $SSH "mkdir -p $REMOTE && tar xf - -C $REMOTE"
+    Common AirPortExtremeTester AirPortExtremeDriver AirPortExtremeUtility Build Tools/fw2c.py \
+    firmware | $SSH "mkdir -p $REMOTE && tar xf - -C $REMOTE"
 
 if [ "$1" = "clean" ]; then
     $SSH "rm -rf $REMOTE/out"
@@ -33,7 +34,12 @@ $SSH "cd $REMOTE && \
       cmake --build out -j8 -- -k 2>&1 | grep -E 'error|warning: implicit|undefined reference|Error|Linking|Built target' | head -200"
 
 mkdir -p Build/out
-for f in AirPortTester.bin AirPortTester.dsk AirPortExtreme.bin AirPortStatus.bin OTCheck.bin; do
+for f in AirPortTester.bin AirPortTester.dsk AirPortExtreme.bin AirPortStatus.bin OTCheck.bin \
+         AirPortExtremeUtility.bin AirPortExtremeStartup.bin; do
     scp -q -i "$KEY" "$VM:$REMOTE/out/$f" Build/out/ 2>/dev/null || echo "missing: $f"
+done
+# Icons: a bundle (BNDL) and a custom icon; the Finder needs the flags
+for f in AirPortExtreme.bin AirPortExtremeUtility.bin AirPortExtremeStartup.bin; do
+    [ -f "Build/out/$f" ] && python Tools/macbin_flags.py "Build/out/$f" custom-icon bundle
 done
 ls -l Build/out
