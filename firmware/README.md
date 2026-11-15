@@ -13,17 +13,38 @@ tar xjf broadcom-wl-6.30.163.46.tar.bz2
 b43-fwcutter -w . broadcom-wl-6.30.163.46.wl_apsta.o
 ```
 
-Then copy these four files from the `b43/` folder it creates into this folder:
+It writes a `b43/` folder. Four of its files are used by this card (802.11
+core revision 5, G PHY):
 
 ```
 ucode5.fw  pcm5.fw  b0g0initvals5.fw  b0g0bsinitvals5.fw
 ```
 
-To compare firmware versions on the Mac without rebuilding, put the same
-four files of another version in a subfolder named `fw-<version>` (for
-example `fw-508.1084`). Every such subfolder is built in as well: the driver
-uses it with `firmware=<version>` in its preferences file, the Tester asks
-which one to use.
+## On the Mac
 
-The build turns them into `b43fw.c`, which ends up inside the program.
-Because of that, **do not publish binaries built with the firmware**.
+The driver and the Tester read the firmware when they start, as Linux reads
+it from `/lib/firmware`. Create a folder named **`AirPort Extreme
+Firmware`** in the System Folder and put in it either:
+
+- the whole `b43` folder written by b43-fwcutter, or
+- the four files above.
+
+To try another firmware version, put its four files in a subfolder (for
+example `AirPort Extreme Firmware:508.1084:`) and add `firmware=508.1084`
+to the `AirPort Extreme Prefs` file in the Preferences folder.
+
+If the firmware is missing, the AirPort Extreme application says so, and
+the driver's log (`AirPortStatus`) names the file it could not read.
+
+## Development builds
+
+A build with `-DAPX_BUILTIN_FIRMWARE=ON` (the default of
+`Build/CMakeLists.txt`) also builds the files of this folder into the
+driver and the Tester (`Tools/fw2c.py` writes `b43fw.c`), as a fallback
+when the Mac has no firmware folder. Put the four files here; subfolders
+named `fw-<version>` hold other versions, chosen with `firmware=<version>`
+or by the Tester's expert mode.
+
+Those programs contain the firmware: **do not publish them**. The files to
+publish come from `Build/build.sh release`, which builds without it and
+checks that no file contains it.

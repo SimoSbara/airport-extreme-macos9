@@ -17,7 +17,7 @@
 #include "b43os9.h"
 #include "apx_status.h"
 
-#define APX_DRIVER_VERSION  "1.0d2"
+#define APX_DRIVER_VERSION  "1.0d3"
 
 /* Settings read from the preferences file (drv_prefs.c) */
 typedef struct drv_prefs {

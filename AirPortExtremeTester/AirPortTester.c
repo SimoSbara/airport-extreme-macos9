@@ -45,6 +45,8 @@
 #include "AirPortTester.h"
 #include "b43os9.h"
 #include "b43fw.h"
+#include "b43fwfile.h"
+#include "b43privacy.h"
 #include "drv_pool.h"
 
 typedef unsigned char  u8;
@@ -129,6 +131,7 @@ static char g_cadence = 'c';
 static Ptr  g_iotrace;                           /* record of the register accesses */
 static unsigned long g_iotrace_max;
 static bool g_auto;                            /* every way of serving the card in turn */
+static bool g_expert;                          /* mode 2: every question */
 static bool g_chip_off;                         /* after the shutdown: no register reads */
 static u32  g_touches;                           /* register reads between two runs */
 
@@ -174,12 +177,24 @@ static void log_flush(void)
 
 static void tester_log(void *ctx, const char *text)
 {
+    static char chunk[1024];
+    unsigned long n;
+
     (void)ctx;
-    fputs(text, stdout);
-    if (g_logf) {
-        fputs(text, g_logf);
-        log_flush();
+    while (*text) {
+        /* MAC addresses cut to the manufacturer's part: the log is meant
+         * for problem reports */
+        for (n = 0; text[n] && n < sizeof(chunk) - 1; n++)
+            chunk[n] = text[n];
+        chunk[n] = '\0';
+        text += n;
+        b43privacy_hide_macs(chunk, n);
+        fputs(chunk, stdout);
+        if (g_logf)
+            fputs(chunk, g_logf);
     }
+    if (g_logf)
+        log_flush();
 }
 
 /* Tester printf: also goes to the log file */
@@ -940,6 +955,34 @@ static void print_summary(void)
     tprintf("============================================================\n");
 }
 
+/* 1 = the AirPortExtreme driver is loaded: it publishes its status block in
+ * the card's Name Registry node */
+static int driver_running(void)
+{
+    RegEntryIter cookie;
+    RegEntryID entry;
+    Boolean done = false;
+    void *st = NULL;
+    RegPropertyValueSize size = sizeof(st);
+    OSStatus err;
+
+    if (RegistryEntryIterateCreate(&cookie) != noErr)
+        return 0;
+    err = RegistryEntrySearch(&cookie, kRegIterContinue, &entry, &done, "name", "pci80211", 9);
+    RegistryEntryIterateDispose(&cookie);
+    if (err != noErr || done)
+        return 0;
+    err = RegistryPropertyGet(&entry, "apx-status", &st, &size);
+    RegistryEntryIDDispose(&entry);
+    return err == noErr && st != NULL;
+}
+
+/* The firmware files stay in memory while the Tester runs */
+static void *tester_fw_alloc(unsigned long size)
+{
+    return NewPtr((Size)size);
+}
+
 /* =========================================================================
  * main
  * ========================================================================= */
@@ -964,10 +1007,41 @@ int main(void)
     tprintf(" AirPort Extreme Tester - Linux 5.15 wireless on Mac OS 9\n");
     tprintf("============================================================\n");
 
-    /* Firmware: the default one, or another version built in */
-    b43_builtin_firmware(&fw);
-    strncpy(g_fw_name, b43_builtin_firmware_name(0), sizeof(g_fw_name) - 1);
-    if (b43_builtin_firmware_name(1)) {
+    /* The driver drives the same chip: two stacks on one card freeze the
+     * Mac, so the Tester runs only without it */
+    if (driver_running()) {
+        tprintf("\n The AirPortExtreme driver is running. Take \"AirPortExtreme\" out of the\n"
+                " Extensions folder, restart, and run the Tester again (put it back after).\n");
+        return 0;
+    }
+    {
+        char ans[8];
+
+        tprintf("\n Mode: 1 = automatic diagnostics (it asks only for the network),\n"
+                "       2 = expert (the measurements used to study the driver)\n");
+        ask_line(" Mode", "1", 1, ans, sizeof(ans));
+        g_expert = ans[0] == '2';
+    }
+
+    /* Firmware: from the files in the System Folder, as the driver; else
+     * the default one built in (development builds), or another version */
+    {
+        static char msg[160];
+
+        if (b43_file_firmware(&fw, NULL, tester_fw_alloc, msg, sizeof(msg)) == B43FW_FILE_OK) {
+            strcpy(g_fw_name, "files");
+            tprintf(" Firmware: %s\n", msg);
+        } else if (b43_builtin_firmware(&fw) == 0) {
+            strncpy(g_fw_name, b43_builtin_firmware_name(0), sizeof(g_fw_name) - 1);
+            tprintf(" Firmware %s, built in (%s)\n", g_fw_name, msg);
+        } else {
+            tprintf("\n No firmware: %s.\n"
+                    " Extract it with b43-fwcutter and put the files in the \"" B43FW_FOLDER_NAME
+                    "\"\n folder of the System Folder (see the README).\n", msg);
+            return 0;
+        }
+    }
+    if (g_expert && b43_builtin_firmware_name(1)) {
         char ans[16];
         int i;
 
@@ -995,6 +1069,7 @@ int main(void)
                 (void *)&probe, (void *)GetApplLimit(),
                 (unsigned long)(((char *)&probe - (char *)GetApplLimit()) / 1024));
     }
+    if (g_expert) {
     {
         char ans[8];
         ask_line(" Radio setup of Linux 3.2 instead of 5.15 (y/n)", "n", 1, ans, sizeof(ans));
@@ -1023,8 +1098,14 @@ int main(void)
         ask_line(" Board flag \"no slow clock\" (y/n)", "n", 1, ans, sizeof(ans));
         g_noslow = (ans[0] == 'y' || ans[0] == 'Y');
     }
-    ask_line(" Network (SSID)", TEST_SSID, 1, g_ssid, sizeof(g_ssid));
-    ask_line(" WPA password (empty for an open network)", TEST_PASSPHRASE, 0, g_pass, sizeof(g_pass));
+    } else {
+        g_cadence = 'c';                /* serve the card all the time */
+    }
+    ask_line(" Network (SSID; empty = only start the card and scan)", g_expert ? TEST_SSID : "",
+             1, g_ssid, sizeof(g_ssid));
+    if (g_ssid[0])
+        ask_line(" WPA password (empty for an open network)", TEST_PASSPHRASE, 0, g_pass,
+                 sizeof(g_pass));
 
     /* Card in the Name Registry */
     RegistryEntryIterateCreate(&cookie);
@@ -1044,7 +1125,8 @@ int main(void)
     tprintf(" MMIO %p\n", (void *)g_ctx.mmio);
 
     /* Memory */
-    {
+    g_use_pool = TEST_DRIVER_POOL;
+    if (g_expert) {
         char ans[8];
         ask_line(" Driver allocator (y/n)", TEST_DRIVER_POOL ? "y" : "n", 1, ans, sizeof(ans));
         g_use_pool = (ans[0] == 'y' || ans[0] == 'Y');
@@ -1076,7 +1158,7 @@ int main(void)
     memset(&opt, 0, sizeof(opt));
     opt.verbose = TEST_B43_VERBOSE;
     opt.pr_debug = TEST_PR_DEBUG;
-    {
+    if (g_expert) {
         /* Trace: every message of the stack, and every work item and timer
          * before it runs (code addresses, for the link map) */
         char ans[8];
@@ -1209,6 +1291,10 @@ int main(void)
                     res[n].ping_sent, res[n].ping_dup, res[n].kbs, res[n].rx_rate / 10,
                     res[n].rx_rate % 10);
         }
+    } else if (!g_ssid[0]) {
+        /* No network: the card started; the scan shows what it hears */
+        (void)do_scan(&target);
+        tprintf("\n No network given: the test ends after the scan\n");
     } else
     /* [3] Scan */
     if (do_scan(&target) < 0) {

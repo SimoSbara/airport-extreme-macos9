@@ -93,6 +93,7 @@ static unsigned long  g_last_click, g_last_click_row = 0xFFFF;
 /* Snapshot of the status block: the window is redrawn when it changes */
 typedef struct view {
     int           driver;
+    unsigned long driver_error;
     unsigned long state, error, power, security;
     char          ssid[33];
     unsigned char bssid[6], channel;
@@ -248,6 +249,8 @@ static void draw_led(short h, short v, short size, int colour)
 /* The led of the connection state */
 static int state_led(const view *v)
 {
+    if (v->driver && v->driver_error)
+        return LED_RED;
     if (!v->driver || v->state == APX_LINK_OFF || v->state == APX_LINK_DOWN)
         return LED_GRAY;
     if (v->state == APX_LINK_CONNECTED)
@@ -307,6 +310,12 @@ static void draw_status(void)
     if (!v->driver) {
         strcpy(line1, "The driver is not running");
         strcpy(line2, "Use the card in the TCP/IP control panel.");
+    } else if (v->driver_error == APX_DRV_NO_FIRMWARE) {
+        strcpy(line1, "The firmware is missing");
+        strcpy(line2, "Put it in the System Folder (see the README).");
+    } else if (v->driver_error) {
+        strcpy(line1, "The card did not start");
+        strcpy(line2, "AirPortStatus saves the log that says why.");
     } else if (v->state == APX_LINK_OFF) {
         strcpy(line1, "AirPort is off");
     } else if (v->state == APX_LINK_DOWN) {
@@ -455,6 +464,7 @@ static void read_view(view *v)
     if (!g_st)
         return;
     v->driver = 1;
+    v->driver_error = g_st->driver_error;
     v->state = g_st->link_state;
     v->error = g_st->link_error;
     v->power = g_st->power;

@@ -44,6 +44,8 @@
  * For the same reason no libc header here (OTMemcpy/OTMemzero instead). */
 #include "drv.h"
 #include "b43fw.h"
+#include "b43fwfile.h"
+#include "drv_pool.h"
 
 #include <OpenTransportKernel.h>
 #include <OpenTransportProviders.h>
@@ -721,7 +723,7 @@ static void *kernel_util_symbol(ConstStr255Param name)
 
     if (!tried) {
         tried = 1;
-        if (GetSharedLibrary("\pOTKernelUtilLib", kPowerPCCFragArch, kReferenceCFrag,
+        if (GetSharedLibrary((ConstStr63Param)"\pOTKernelUtilLib", kPowerPCCFragArch, kReferenceCFrag,
                              &conn, &main_addr, err_name) != noErr)
             conn = 0;
     }
@@ -748,8 +750,10 @@ static OTPortRef find_port(void)
     TPortRecord *port;
     OTItemCount i;
 
-    get_indexed_port = (get_indexed_port_fn)kernel_util_symbol("\pOTGetIndexedPort");
-    g_change_port_state = (change_port_state_fn)kernel_util_symbol("\pOTChangePortState");
+    get_indexed_port = (get_indexed_port_fn)kernel_util_symbol(
+        (ConstStr255Param)"\pOTGetIndexedPort");
+    g_change_port_state = (change_port_state_fn)kernel_util_symbol(
+        (ConstStr255Param)"\pOTChangePortState");
     if (!get_indexed_port || !g_change_port_state) {
         drv_log("apx: OTKernelUtilLib has no OTGetIndexedPort/OTChangePortState: TCP/IP"
                 " will not hear of network changes\n");
@@ -1100,6 +1104,53 @@ static void publish_status(void)
         RegistryPropertySet(&g_node, APX_STATUS_PROPERTY, &g_st, sizeof(g_st));
 }
 
+static void *firmware_alloc(unsigned long size)
+{
+    return drv_pool_alloc(size);        /* resident; kept while the driver runs */
+}
+
+static void set_firmware_source(const char *s)
+{
+    unsigned long n = 0;
+
+    while (s[n] && n < sizeof(g_st->firmware) - 1) {
+        g_st->firmware[n] = s[n];
+        n++;
+    }
+    g_st->firmware[n] = '\0';
+}
+
+/* The firmware: from the files in the System Folder (as Linux reads it
+ * from /lib/firmware), else the one built in by a development build.
+ * firmware= in the prefs picks a version: a subfolder of the firmware
+ * folder, or a version built in. Task time. 0 = fw filled. */
+static int load_firmware(b43os9_firmware *fw)
+{
+    static char msg[160];
+    const char *version = g_prefs.firmware[0] ? g_prefs.firmware : NULL;
+    int rc = b43_file_firmware(fw, version, firmware_alloc, msg, sizeof(msg));
+
+    if (rc == B43FW_FILE_OK) {
+        drv_log("apx: firmware: %s\n", msg);
+        set_firmware_source(msg);
+        return 0;
+    }
+    if (version && b43_builtin_firmware_named(version, fw) == 0) {
+        drv_log("apx: firmware %s, built in (%s)\n", version, msg);
+        set_firmware_source("built in");
+        return 0;
+    }
+    if (b43_builtin_firmware(fw) == 0) {
+        drv_log("apx: firmware %s, built in (%s)\n", b43_builtin_firmware_name(0), msg);
+        set_firmware_source("built in");
+        return 0;
+    }
+    drv_log("apx: no firmware: %s. Extract it with b43-fwcutter and put the files in the"
+            " \"" B43FW_FOLDER_NAME "\" folder of the System Folder (see the README)\n", msg);
+    set_firmware_source(msg);
+    return -1;
+}
+
 /* Brings up the Linux stack (task time: File Manager, PoolAllocateResident) */
 static int attach_stack(void)
 {
@@ -1115,6 +1166,8 @@ static int attach_stack(void)
         return -1;
     g_st->magic = APX_STATUS_MAGIC;
     g_st->version = APX_STATUS_VERSION;
+    OTMemcpy(g_st->driver_version, APX_DRIVER_VERSION, sizeof(APX_DRIVER_VERSION));
+    g_st->driver_error = APX_DRV_FAILED;        /* until the stack is up */
 
     drv_prefs_defaults(&g_prefs);
     prefs_err = drv_prefs_load(&g_prefs);
@@ -1156,20 +1209,17 @@ static int attach_stack(void)
     opt.dma = g_prefs.dma && drv_env_dma_init(g_prefs.dma_uncached) == 0;
     wpa_debug_level = g_prefs.wpa_debug;
 
-    b43_builtin_firmware(&fw);
-    if (!g_prefs.firmware[0])
-        drv_log("apx: firmware %s\n", b43_builtin_firmware_name(0));
-    else if (b43_builtin_firmware_named(g_prefs.firmware, &fw) == 0)
-        drv_log("apx: firmware %s (firmware= in the prefs)\n", g_prefs.firmware);
-    else
-        drv_log("apx: firmware \"%s\" is not built in: using %s\n", g_prefs.firmware,
-                b43_builtin_firmware_name(0));
+    if (load_firmware(&fw)) {
+        g_st->driver_error = APX_DRV_NO_FIRMWARE;
+        return -1;
+    }
     rc = b43os9_attach(&g_b43, mmio, drv_env(), &fw, &opt, drv_link_events());
     if (rc != B43OS9_OK) {
         drv_log("apx: b43os9_attach failed: %d\n", rc);
         return -1;
     }
     drv_link_init(g_b43, &g_prefs, g_st);
+    g_st->driver_error = APX_DRV_OK;
     return 0;
 }
 

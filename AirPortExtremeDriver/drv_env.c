@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "drv.h"
+#include "b43privacy.h"
 #include "drv_pool.h"
 
 /* Formatter of Common/compat (b43compat.c): %pM etc., no libc stdio */
@@ -132,22 +133,32 @@ static void log_puts(const char *s)
 
 static void env_log(void *ctx, const char *text)
 {
-    char stamp[16];
+    char stamp[16], chunk[512];
+    const char *p;
+    unsigned long n;
 
     (void)ctx;
     if (!g_st || !g_st->log_buf)
         return;
-    for (; *text; text++) {
-        if (g_line_start) {
-            /* "[seconds.milliseconds] " since startup */
-            unsigned long ms = drv_time_ms();
-            b43c_snprintf(stamp, sizeof(stamp), "[%lu.%03lu] ", ms / 1000, ms % 1000);
-            log_puts(stamp);
-            g_line_start = 0;
+    while (*text) {
+        /* MAC addresses are cut to the manufacturer's part before they
+         * reach the log (it ends up in public problem reports) */
+        for (n = 0; text[n] && n < sizeof(chunk) - 1; n++)
+            chunk[n] = text[n];
+        text += n;
+        b43privacy_hide_macs(chunk, n);
+        for (p = chunk; p < chunk + n; p++) {
+            if (g_line_start) {
+                /* "[seconds.milliseconds] " since startup */
+                unsigned long ms = drv_time_ms();
+                b43c_snprintf(stamp, sizeof(stamp), "[%lu.%03lu] ", ms / 1000, ms % 1000);
+                log_puts(stamp);
+                g_line_start = 0;
+            }
+            log_putc(*p);
+            if (*p == '\n')
+                g_line_start = 1;
         }
-        log_putc(*text);
-        if (*text == '\n')
-            g_line_start = 1;
     }
 }
 

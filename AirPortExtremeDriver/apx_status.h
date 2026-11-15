@@ -36,7 +36,7 @@
 
 #define APX_STATUS_PROPERTY "apx-status"
 #define APX_STATUS_MAGIC    0x41505853UL        /* 'APXS' */
-#define APX_STATUS_VERSION  3
+#define APX_STATUS_VERSION  4
 
 /* Commands (apx_status.cmd) */
 enum {
@@ -112,11 +112,35 @@ enum {
     APX_FAIL_ERROR              /* internal error, see the log */
 };
 
+/* The driver could not start (apx_status.driver_error): the log says why */
+enum {
+    APX_DRV_OK = 0,
+    APX_DRV_NO_FIRMWARE,        /* the firmware files are missing or bad */
+    APX_DRV_FAILED              /* the chip or the stack did not start */
+};
+
+/* The card, for problem reports (from b43os9_hwinfo); valid when
+ * hw_valid is set, the firmware revision once the interface was up */
+typedef struct apx_hw {
+    unsigned short chip_id, chip_rev, chip_pkg;
+    unsigned short core_rev;
+    unsigned short board_vendor, board_type, board_rev;
+    unsigned char  phy_type, phy_rev;
+    unsigned short radio_manuf, radio_ver, radio_rev;
+    unsigned char  sprom_rev;
+    unsigned short boardflags_lo, boardflags_hi;
+    unsigned short fw_rev, fw_patch;
+} apx_hw;
+
 typedef struct apx_status {
     unsigned long magic;            /* APX_STATUS_MAGIC */
     unsigned long version;          /* APX_STATUS_VERSION */
     char          driver_version[16];
     char          country[4];       /* regulatory domain, "00" = world */
+    unsigned long driver_error;     /* APX_DRV_* */
+    char          firmware[64];     /* where the firmware came from */
+    unsigned long hw_valid;
+    apx_hw        hw;
 
     /* Connection */
     unsigned long link_state;       /* APX_LINK_* */

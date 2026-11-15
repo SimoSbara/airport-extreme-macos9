@@ -373,6 +373,34 @@ static void handshake_failed(void)
     }
 }
 
+/* The card, for problem reports: at startup, and again once the interface
+ * is up (the firmware revision is known only then) */
+static void fill_hw(void)
+{
+    b43os9_hwinfo info;
+    apx_hw *hw = &g_st->hw;
+
+    b43os9_get_hwinfo(g_b, &info);
+    hw->chip_id = info.chip_id;
+    hw->chip_rev = info.chip_rev;
+    hw->chip_pkg = info.chip_pkg;
+    hw->core_rev = info.core_rev;
+    hw->board_vendor = info.board_vendor;
+    hw->board_type = info.board_type;
+    hw->board_rev = info.board_rev;
+    hw->phy_type = info.phy_type;
+    hw->phy_rev = info.phy_rev;
+    hw->radio_manuf = info.radio_manuf;
+    hw->radio_ver = info.radio_ver;
+    hw->radio_rev = info.radio_rev;
+    hw->sprom_rev = info.sprom_rev;
+    hw->boardflags_lo = info.boardflags_lo;
+    hw->boardflags_hi = info.boardflags_hi;
+    hw->fw_rev = info.fw_rev;
+    hw->fw_patch = info.fw_patch;
+    g_st->hw_valid = 1;
+}
+
 void drv_link_init(b43os9 *b, const drv_prefs *prefs, apx_status *st)
 {
     g_b = b;
@@ -389,6 +417,7 @@ void drv_link_init(b43os9 *b, const drv_prefs *prefs, apx_status *st)
     st->power = (unsigned long)g_power;
     st->link_state = g_power ? APX_LINK_DOWN : APX_LINK_OFF;
     st->cmd_done = st->cmd_seq;         /* nothing pending from before */
+    fill_hw();
 }
 
 /* Leaves the current network, if any (the disconnected event follows) */
@@ -533,6 +562,7 @@ void drv_link_step(int want_up)
             return;
         }
         g_up = 1;
+        fill_hw();              /* the firmware revision is known now */
         retry(500);             /* let b43 run its first periodic work */
         return;
     }

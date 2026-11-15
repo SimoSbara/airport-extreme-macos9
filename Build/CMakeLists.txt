@@ -16,27 +16,40 @@ set(COMMON ${CMAKE_CURRENT_SOURCE_DIR}/../Common)
 set(TESTER ${CMAKE_CURRENT_SOURCE_DIR}/../AirPortExtremeTester)
 set(TOOLS ${CMAKE_CURRENT_SOURCE_DIR}/../Tools)
 
-# Broadcom firmware (not redistributable, kept out of the repository): the .fw
-# files extracted with b43-fwcutter go in firmware/ (see firmware/README.md).
-# b43fw.c is generated here, in the build directory.
+# Broadcom firmware (not redistributable, kept out of the repository).
+# The programs read it from files at run time (Common/os9/b43fwfile.c: the
+# "AirPort Extreme Firmware" folder in the System Folder, see
+# firmware/README.md). A development build can also build it in, as a
+# fallback: the .fw files extracted with b43-fwcutter go in firmware/, and
+# firmware/fw-<version>/ holds other versions to compare (firmware= in the
+# driver's prefs, a question in the Tester). A program built with it
+# contains the firmware and must not be published: release builds use
+# -DAPX_BUILTIN_FIRMWARE=OFF (Build/build.sh release).
+option(APX_BUILTIN_FIRMWARE "Build the firmware in firmware/ into the programs" ON)
 set(FIRMWARE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../firmware CACHE PATH "Directory with the b43 .fw files")
-set(FIRMWARE_FILES
-    ${FIRMWARE_DIR}/ucode5.fw ${FIRMWARE_DIR}/pcm5.fw
-    ${FIRMWARE_DIR}/b0g0initvals5.fw ${FIRMWARE_DIR}/b0g0bsinitvals5.fw)
-foreach(f ${FIRMWARE_FILES})
-    if(NOT EXISTS ${f})
-        message(FATAL_ERROR "Missing firmware ${f}: see firmware/README.md")
-    endif()
-endforeach()
-# Other versions to compare, in firmware/fw-<version>/: built in as well and
-# chosen by name at run time (firmware= in the driver's prefs, a question in
-# the Tester)
-file(GLOB FIRMWARE_ALT_FILES CONFIGURE_DEPENDS ${FIRMWARE_DIR}/fw-*/*.fw)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/b43fw.c
-    COMMAND ${Python3_EXECUTABLE} ${TOOLS}/fw2c.py ${FIRMWARE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/b43fw.c
-    DEPENDS ${FIRMWARE_FILES} ${FIRMWARE_ALT_FILES} ${TOOLS}/fw2c.py)
+if(APX_BUILTIN_FIRMWARE)
+    set(FIRMWARE_FILES
+        ${FIRMWARE_DIR}/ucode5.fw ${FIRMWARE_DIR}/pcm5.fw
+        ${FIRMWARE_DIR}/b0g0initvals5.fw ${FIRMWARE_DIR}/b0g0bsinitvals5.fw)
+    foreach(f ${FIRMWARE_FILES})
+        if(NOT EXISTS ${f})
+            message(FATAL_ERROR "Missing firmware ${f}: see firmware/README.md,"
+                " or build without it (-DAPX_BUILTIN_FIRMWARE=OFF)")
+        endif()
+    endforeach()
+    file(GLOB FIRMWARE_ALT_FILES CONFIGURE_DEPENDS ${FIRMWARE_DIR}/fw-*/*.fw)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/b43fw.c
+        COMMAND ${Python3_EXECUTABLE} ${TOOLS}/fw2c.py ${FIRMWARE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/b43fw.c
+        DEPENDS ${FIRMWARE_FILES} ${FIRMWARE_ALT_FILES} ${TOOLS}/fw2c.py)
+else()
+    message(STATUS "No firmware built in: the programs read it from files")
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/b43fw.c
+        COMMAND ${Python3_EXECUTABLE} ${TOOLS}/fw2c.py --none ${CMAKE_CURRENT_BINARY_DIR}/b43fw.c
+        DEPENDS ${TOOLS}/fw2c.py)
+endif()
 
 # Options as in the Linux kernel (top-level Makefile)
 set(LINUX_CFLAGS
@@ -70,6 +83,8 @@ file(GLOB LINUX_SOURCES
     ${COMMON}/os9/*.c)
 # The EXTIF driver is only needed by CodeWarrior (see b43compat.h)
 list(REMOVE_ITEM LINUX_SOURCES ${COMMON}/ssb/ssb_driver_extif.c)
+# The firmware file reader uses the Mac OS headers: it goes in the programs
+list(REMOVE_ITEM LINUX_SOURCES ${COMMON}/os9/b43fwfile.c)
 list(APPEND LINUX_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/b43fw.c)
 
 add_library(linux80211 STATIC ${LINUX_SOURCES})
@@ -108,6 +123,7 @@ target_link_libraries(wpas PUBLIC linux80211)
 add_application(AirPortTester
     ${TESTER}/AirPortTester.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../AirPortExtremeDriver/drv_pool.c
+    ${COMMON}/os9/b43fwfile.c
     ${CMAKE_CURRENT_SOURCE_DIR}/AirPortTester.r
     CONSOLE)
 target_include_directories(AirPortTester PRIVATE ${TESTER} ${COMMON}/os9
@@ -138,6 +154,7 @@ if(EXISTS ${OT_KERNEL_LIB})
         ${DRIVER}/drv_pool.c
         ${DRIVER}/drv_prefs.c
         ${DRIVER}/drv_screen.c
+        ${COMMON}/os9/b43fwfile.c
         ${DRIVER}/icon_driver.r
         ${DRIVER}/AirPortDriver.r)
     target_include_directories(AirPortExtreme PRIVATE ${DRIVER} ${COMMON}/os9)
