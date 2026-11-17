@@ -47,4 +47,7 @@ extern void *const b43compat_param_nohwcrypt;       /* b43 */
 extern void *const b43compat_param_qos;             /* b43 */
 extern void *const b43compat_param_ieee80211_regdom; /* cfg80211 */
 
+/* b43os9_hw.c: see there */
+void b43os9_ack_address_masks(struct b43os9 *b);
+
 #endif /* B43OS9_PRIV_H_ */

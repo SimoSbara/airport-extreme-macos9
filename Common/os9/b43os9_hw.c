@@ -174,3 +174,45 @@ int b43os9_set_boardflags(b43os9 *b, unsigned short set)
     mutex_unlock(&wl->mutex);
     return 0;
 }
+
+/* =========================================================================
+ * Receiver address of the ACK and CTS frames
+ *
+ * The firmware sends its ACK/CTS from a 16-byte template (template RAM
+ * offset 0); the transmit modify engine replaces each 16-bit word of it with
+ * a value, in the bits where the word's mask register has ones. The receiver
+ * address is words 10, 12 and 14: the firmware loads the values (the sender
+ * of the frame it answers), the masks are registers 0x58A, 0x58C and 0x58E.
+ * The initial values (b0g0initvals5) set the masks of words 0 to 8 only, and
+ * b43's dummy transmission leaves zeros in the address part of the template.
+ *
+ * On a PowerBook6,1 (BCM4306 rev 3, core rev 5, firmware 784.2) the three
+ * masks held a fixed pattern instead of all ones: every ACK went out on time
+ * with the receiver address ANDed with that pattern (seen in a capture from
+ * a second machine), so the access point never got one, sent every frame
+ * again and stayed at 1 Mbit/s, or did not start the WPA handshake at all.
+ * With 0xFFFF in the masks the ACKs are addressed correctly.
+ *
+ * Called after the interface is up: b43_chip_init has loaded the initial
+ * values by then.
+ * ========================================================================= */
+void b43os9_ack_address_masks(b43os9 *b)
+{
+    struct ieee80211_hw *hw;
+    struct b43_wl *wl;
+    struct b43_wldev *dev;
+
+    if (!b->dev)
+        return;
+    hw = wiphy_to_ieee80211_hw(b->dev->ieee80211_ptr->wiphy);
+    wl = hw_to_b43_wl(hw);
+    mutex_lock(&wl->mutex);
+    dev = wl->current_dev;
+    if (dev && b43_status(dev) >= B43_STAT_STARTED &&
+        dev->phy.type == B43_PHYTYPE_G && dev->dev->core_rev == 5) {
+        b43_write16(dev, 0x58A, 0xFFFF);
+        b43_write16(dev, 0x58C, 0xFFFF);
+        b43_write16(dev, 0x58E, 0xFFFF);
+    }
+    mutex_unlock(&wl->mutex);
+}

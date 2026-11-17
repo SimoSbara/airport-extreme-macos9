@@ -229,6 +229,8 @@ int b43os9_up(b43os9 *b, const unsigned char *mac)
     }
     err = dev_open(b->dev, NULL);
     rtnl_unlock();
+    if (!err)
+        b43os9_ack_address_masks(b);
     return err;
 }
 
